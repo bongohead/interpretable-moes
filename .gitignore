@@ -1,0 +1,17 @@
+# Misc
+.env
+*.csv
+*.db
+*.env
+*.html
+*.pt
+
+# Python
+.venv
+__pycache__
+.ipynb_checkpoints
+
+# Stored models
+hf/*
+models/*
+wandb/*
