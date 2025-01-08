@@ -1,12 +1,12 @@
 #!/bin/bash
 
 # Install necessary packages
-pip install -U torch
+pip install -U torch==2.4.1
 pip install -U jupyter lab
 pip install -U wandb
 pip install -U bitsandbytes
 pip install -U git+https://github.com/huggingface/transformers.git
-pip install -U git+https://github.com/huggingface/accelerate.git
+pip install -U accelerate
 pip install plotly.express
 pip install scikit-learn
 pip install -U flash-attn --no-build-isolation
@@ -21,3 +21,6 @@ pip install aiohttp
 pip install asyncio
 
 echo "All packages have been installed successfully."
+
+# See https://github.com/pytorch/pytorch/issues/111469
+# unset LD_LIBRARY_PATH
