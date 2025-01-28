@@ -1,8 +1,12 @@
+# Contains helper functions for CUDA memory management
 import torch
 import gc
 import time 
 
 def check_memory():
+    """
+    Check memory of all CUDA devices
+    """
     device_count = torch.cuda.device_count()
     if device_count == 0:
         print("No CUDA devices found.")
@@ -17,6 +21,9 @@ def check_memory():
 
 
 def clear_all_cuda_memory():
+    """
+    Clear all CUDA memory
+    """
     # Ensure all CUDA operations are complete
     torch.cuda.synchronize()
     
