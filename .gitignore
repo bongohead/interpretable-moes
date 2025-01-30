@@ -5,6 +5,7 @@
 *.env
 *.html
 *.pt
+*.json
 
 # Python
 .venv
@@ -12,6 +13,6 @@ __pycache__
 .ipynb_checkpoints
 
 # Stored models
-hf/*
-models/*
-wandb/*
+**/hf/*
+**/models/*
+**/wandb/*
