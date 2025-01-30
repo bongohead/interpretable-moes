@@ -19,6 +19,7 @@ pip install sqlalchemy
 pip install python-dotenv
 pip install aiohttp
 pip install asyncio
+pip install datasets
 
 echo "All packages have been installed successfully."
 
