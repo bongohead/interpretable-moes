@@ -44,34 +44,61 @@ def clear_all_cuda_memory():
     print("All CUDA memory cleared on all devices.")
 
 
-def profile_memory(func, *args, **kwargs):
+def profile_memory(func, warmup = 3, runs = 10, *args, **kwargs):
     """
-    Profile peak CUDA memory usage of a torch function.
+    Profile peak CUDA memory usage of a torch function. Uses warmup/multiple passes for more accuracy.
 
     Params
-    @func: The function to test 
-    @args, kwarsg: Arguments to pass to the function
+        @func: The function to test.
+        @warmup: Number of warmup runs before timing.
+        @runs: Number of timed runs.
+        @args, kwarsg: Arguments to pass to the function
     
     Examples:
-        profile_memory(np.diff, [0, 2, 5, 10, 12], n = 1)
+        profile_memory(np.diff, a = [0, 2, 5, 10, 12], n = 1)
     """
-    torch.cuda.reset_peak_memory_stats()
-    torch.cuda.empty_cache()
-    start_mem = torch.cuda.memory_allocated()
-    
-    # Run function
-    start_time = time.time()
-    result = func(*args, **kwargs)
-    end_time = time.time()
-    
-    end_mem = torch.cuda.memory_allocated()
-    peak_mem = torch.cuda.max_memory_allocated()
-    
+    for _ in range(warmup):
+        func(*args, **kwargs)
+        torch.cuda.synchronize()  # Make sure each warmup run finishes
+
+    times = []
+    peak_mems = []
+    incd_mens = []
+
+    for _ in range(runs):
+        # Clear caches & reset memory stats
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+        
+        # Measure allocated memory before
+        start_mem_bytes = torch.cuda.memory_allocated()
+        
+        # Start timing
+        start_time = time.time()
+        
+        # Run the function (forward + backward)
+        result = func(*args, **kwargs)
+        
+        # Synchronize to ensure all GPU work completes
+        torch.cuda.synchronize()
+        end_time = time.time()
+        
+        # Measure memory usage after
+        end_mem_bytes = torch.cuda.memory_allocated()
+        peak_mem_bytes = torch.cuda.max_memory_allocated()
+        
+        times.append(end_time - start_time)
+        
+        peak_mems.append(peak_mem_bytes)
+        incd_mens.append(end_mem_bytes - start_mem_bytes)
+        
+    avg_time = sum(times)/len(times)
+    avg_peak_mem = sum(peak_mems)/len(peak_mems)
+    avg_incd_mem = sum(incd_mens)/len(incd_mens)
+
     return {
-        'name': func.__name__,
-        'start_memory': f"{start_mem/1e6:.1f}MB",
-        'end_memory': f"{end_mem/1e6:.1f}MB", 
-        'peak_memory': f"{peak_mem/1e6:.1f}MB",
-        'memory_increase': f"{(end_mem - start_mem)/1e6:.1f}MB",
-        'time': f"{end_time - start_time:.3f}s"
+        "runs": runs,
+        "average_time":  f"{avg_time:.8f}s",
+        "average_peak_mem": f"{(avg_peak_mem/1e6):.4f}MB",
+        "average_increase_mem_MB": f"{(avg_incd_mem/1e6):.4f}MB",
     }
