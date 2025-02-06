@@ -58,5 +58,5 @@ def load_shard_as_dataloader(shard_path, tokenizer, batch_size, seq_len, eos_sep
     attention_mask = (input_ids != tokenizer.pad_token_id).long()
 
     ds = TextDataset({'input_ids': input_ids, 'attention_mask': attention_mask})
-    dl = DataLoader(ds, batch_size = batch_size, shuffle = False)
+    dl = DataLoader(ds, batch_size = batch_size, shuffle = True)
     return dl
