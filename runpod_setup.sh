@@ -13,6 +13,7 @@ pip install --upgrade jupyterlab ipywidgets jupyterlab-widgets
 
 # Install Python 3.12
 apt install -y python3.12
+apt-get install python3.12-dev
 
 # Set Python 3.12 as the default python
 update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1

@@ -5,6 +5,7 @@ pip install torch==2.5.1
 pip install bitsandbytes==0.45.2
 pip install transformers==4.48.3
 pip install accelerate==1.3.0
+pip install triton==3.1.0
 pip install flash-attn==2.7.4.post1 --no-build-isolation
 pip install jupyter lab
 pip install plotly.express
