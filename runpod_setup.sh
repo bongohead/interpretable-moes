@@ -25,4 +25,4 @@ apt install -y python3.12-venv
 python -m ensurepip --upgrade
 
 # Install packages
-sh /workspace/projects/interpretable-moes/install_packages.sh
+sh install_packages.sh
