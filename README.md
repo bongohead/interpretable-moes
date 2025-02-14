@@ -1,3 +1,7 @@
+# About
+This contains custom architecture and training code for developing intrinsically interpretable mixture-of-expert (MoE) models. See our [research plan](https://drive.google.com/file/d/18ERsEI6nj_GcAxeZ_h7FeY9q8eeeFdES/view?usp=sharing) for a project overview.
+
+
 # Research Development Setup
 1. Acquire a server with a CUDA-compatible GPU on Runpod.
 2. Clone this repo: `git clone https://github.com/bongohead/interpretable-moes`
