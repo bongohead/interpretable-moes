@@ -5,7 +5,6 @@
 *.env
 *.html
 *.pt
-*.json
 
 # Python
 .venv
@@ -16,3 +15,7 @@ __pycache__
 **/hf/*
 **/models/*
 **/wandb/*
+
+# Data
+*.json
+samples_*.yaml

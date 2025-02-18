@@ -126,7 +126,7 @@ def get_context_aware_test_data(search_path: str, tokenizer, max_length: int = 5
     dls = []
     for file_path in sorted(yaml_files):
         ds = ContextAwarenessDataset(file_path = file_path, tokenizer = tokenizer, max_length = max_length)
-        if ds is None:
+        if ds is None or len(ds) == 0:
             continue
         dls.append({
             'test_token': ds.test_token,
