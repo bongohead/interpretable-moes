@@ -56,7 +56,6 @@
     ```
 - token_meanings:
   - " -": subtraction/negative operator, list-item denoter, text seperator or break, often in informal writing
-  - ":": introduces or presents what follows, time seperator, function type annotation
   - " *": multiplication operator with whitespace, wildcard operator with whitespace in search/patterns, emphasis marker in texting/markdown
   - " {": set notation, programming block delimiter, placeholder
   - " #": comment line indicator, social media tag, numbered item/rank
@@ -68,8 +67,10 @@
   - " branch": tree limb, organizational division, git branch
   - " bug": insect, software defect, covert listening device
   - " clip": short video segment, attach/fasten, trim/cut
+  - ":": introduces or presents what follows, time seperator, function type annotation
   - " drive": operate a vehicle, storage device, motivating force
   - " key": device to open locks, critical/important, musical tonal framework
+  - " λ": functional programming, greek letter, wavelength symbol
   - " light": electromagnetic radiation/illumination, pale in color, not heavy
   - " match": ignition stick, sports event, a correspondence concept
   - " model": a simplified representation, person who poses for fashion, particular product version
@@ -78,4 +79,3 @@
   - " second": unit of time, numberical position after first, to formally support a notion
   - " shell": sea shell, command line shell, explosive
   - " PR": pull request, public relations, personal record
-  - " λ": functional programming, greek letter, wavelength symbol
