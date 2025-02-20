@@ -155,8 +155,8 @@ def get_js_distance(counts_p, counts_q):
     p_dict = {}
     q_dict = {}
     for e in experts_union:
-        p_dict[e] = counts_p[e] / sum_p
-        q_dict[e] = counts_q[e] / sum_q
+        p_dict[e] = counts_p.get(e, 0) / sum_p
+        q_dict[e] = counts_q.get(e, 0) / sum_q
     
     # Compute the mixture m(e) = 0.5*(p(e) + q(e))
     m_dict = {}
@@ -188,7 +188,7 @@ def get_js_distance(counts_p, counts_q):
 def get_context_awareness_metric(model, test_token_data_list, main_device):
     """
     Compute the CA metric for each test token x layer, using JS distance to compare each meaning-specific expert distribution vs. 
-     the overall distribution for that token.
+     the overall distribution for that token. This is the memory-efficient but slower version.
     
     Params:
         @model: The model, must return `all_topk_experts` which is a tuple of length equal to # layers, where each element of
@@ -278,7 +278,7 @@ def get_context_awareness_metric(model, test_token_data_list, main_device):
 def get_token_specialization_metric(model, test_token_data_list, main_device, pad_token_id):
     """
     Computes a token specialization metric for each test token x layer, using the JS distance b/t: (a) the distribution of 
-      experts used for that token and (b) the distribution of experts used for *all* tokens (excluding padding).
+      experts used for that token and (b) the distribution of experts used for *all* tokens (excluding padding). This is the memory-efficient but slower version.
     
     Params:
         @model: The model, must return `all_topk_experts` which is a tuple of length equal to # layers, where each element of
@@ -347,4 +347,210 @@ def get_token_specialization_metric(model, test_token_data_list, main_device, pa
 
         results[token_str] = {i: val for i, val in enumerate(layer_js_list)}
 
+    return results
+
+
+@torch.no_grad()
+def get_context_awareness_metric_fast(model, test_token_data_list, main_device):
+    """
+    This is the FAST version but uses more memory - set low dataloader sizes.
+
+    Compute the CA metric for each test token x layer, using JS distance to compare each meaning-specific expert distribution vs. 
+     the overall distribution for that token.
+    
+    Params:
+        @model: The model, must return `all_topk_experts` which is a tuple of length equal to # layers, where each element of
+          the tuple is a BN x topk tensor of selected expert IDs.
+        @test_token_data_list: A list of dictionaries of the exact format returned by `get_context_aware_test_data`.
+
+    Returns:
+        A dict of format:
+            {
+                test_token1: {0: .52, 1: .34, ...},
+                test_token2: {0: .55, 1: .62, ...},
+                ...
+            },
+          where the keys represent layer indices and the values represent context-awareness scores between 0 - 1
+    """
+    results = {}
+
+    n_layers = model.conf.n_layers
+    n_experts = model.conf.n_experts
+
+    for test_item in test_token_data_list:
+        test_token = test_item["test_token"]
+        test_token_id = test_item["test_token_id"]
+        test_meanings = test_item["test_meanings"]
+        dl = test_item["dl"]
+
+        meaning_counts_per_layer = [
+            [torch.zeros(n_experts, dtype = torch.long, device = 'cpu') for _ in range(len(test_meanings))]
+            for _ in range(n_layers)
+        ] # meaning_counts_per_layer[l][meaning_idx]"" torch.LongTensor of shape (n_experts,) expert-length count
+        # total_counts_per_layer[l]: same shape (n_experts,), expert-length count for baseline usage
+        total_counts_per_layer = [torch.zeros(n_experts, dtype = torch.long, device = 'cpu') for _ in range(n_layers)]
+
+        # Map each meaning string to an index
+        meaning_to_idx = {m: i for i, m in enumerate(test_meanings)}
+
+        for batch in dl:
+            input_ids = batch["input_ids"].to(main_device)
+            attention_mask = batch["attention_mask"].to(main_device)
+            batch_meanings = batch["test_meanings"]
+            B, N = input_ids.shape
+
+            outputs = model(input_ids, attention_mask, moe_method = 'forward_slow', use_lflb = False, use_checkpointing = False)
+            all_topk_experts = outputs['all_topk_experts']
+            
+            flat_ids = input_ids.view(-1)  # shape (B*N, ) # Flatten the input IDs for indexing alignment with all_topk_experts
+            
+            # Convert each example's meaning label to an integer index shape (B,). e.g. meaning_id_array[b] = meaning_idx of that example
+            meaning_id_array = []
+            for b_idx in range(B):
+                m_str = batch_meanings[b_idx]
+                meaning_id_array.append(meaning_to_idx[m_str])
+            meaning_id_array = torch.tensor(meaning_id_array, device = main_device)  # (B,)
+            meaning_id_array = meaning_id_array.unsqueeze(1).repeat(1, N).view(-1)  # Expand to shape (B, N), so each token in that example has the same meaning
+
+
+            for l in range(n_layers):
+                layer_exps = all_topk_experts[l]  # shape (BN, top_k)
+
+                # A) Baseline distribution for the token - we want all rows where (flat_ids == test_token_id)
+                base_mask = (flat_ids == test_token_id)
+                base_idx = base_mask.nonzero(as_tuple=True)[0]
+                if len(base_idx) > 0:
+                    base_exps = layer_exps[base_idx, :] # gather => shape (#rows, top_k)
+                    base_exps = base_exps.view(-1) # flatten => (#rows * top_k,)
+                    hist_base = torch.bincount(base_exps, minlength = n_experts) # bincount => shape (n_experts,)
+                    hist_base = hist_base.cpu()
+                    total_counts_per_layer[l] += hist_base
+
+                # B) For each meaning m, gather usage mask: (flat_ids == test_token_id) & (meaning_id_array == m)
+                for m_idx in range(len(test_meanings)):
+                    meaning_mask = (flat_ids == test_token_id) & (meaning_id_array == m_idx)
+                    mm_idx = meaning_mask.nonzero(as_tuple=True)[0]
+                    if len(mm_idx) > 0:
+                        m_exps = layer_exps[mm_idx, :]
+                        m_exps = m_exps.view(-1)
+                        hist_m = torch.bincount(m_exps, minlength = n_experts)
+                        hist_m = hist_m.cpu()
+                        meaning_counts_per_layer[l][m_idx] += hist_m
+
+        # Now compute the average JS distance for each layer (comparing each meaning vs. the overall distribution) then averaging
+        layer_js_distances = []
+        for l in range(n_layers):
+            meaning_dists = []
+            
+            # Convert total_counts -> python dict 
+            base_array = total_counts_per_layer[l].numpy()
+            dict_base = {}
+            for ex_id, c_val in enumerate(base_array):
+                if c_val > 0:
+                    dict_base[ex_id] = int(c_val)
+            
+            # Each meaning
+            for m_idx in range(len(test_meanings)):
+                sense_arr = meaning_counts_per_layer[l][m_idx].numpy()
+                dict_sense = {}
+                for ex_id, c_val in enumerate(sense_arr):
+                    if c_val > 0:
+                        dict_sense[ex_id] = int(c_val)
+                d_js = get_js_distance(dict_sense, dict_base)
+                meaning_dists.append(d_js)
+
+            avg_js = sum(meaning_dists) / len(meaning_dists)
+            layer_js_distances.append(avg_js)
+
+        results[test_token] = {layer_idx: val for layer_idx, val in enumerate(layer_js_distances)}
+
+    return results
+
+
+@torch.no_grad()
+def get_token_specialization_metric_fast(model, test_token_data_list, main_device, pad_token_id):
+    """
+    This is the FAST version but uses more memory - set low dataloader sizes.
+
+    Computes a token specialization metric for each test token x layer, using the JS distance b/t: (a) the distribution of 
+      experts used for that token and (b) the distribution of experts used for *all* tokens (excluding padding).
+    
+    Params:
+        @model: The model, must return `all_topk_experts` which is a tuple of length equal to # layers, where each element of
+          the tuple is a BN x topk tensor of selected expert IDs.
+        @test_token_data_list: A list of dictionaries of the exact format returned by `get_context_aware_test_data`.
+        @pad_token_id: The ID used for padding, which we should exclude from the "global usage" distribution.
+
+    Returns:
+        A dict of format:
+            {
+                test_token1: {0: .52, 1: .34, ...},
+                test_token2: {0: .55, 1: .62, ...},
+                ...
+            },
+          where the keys represent layer indices and the values represent token-specialization scores between 0 - 1
+    """
+    results = {}
+
+    n_layers = model.conf.n_layers
+    n_experts = model.conf.n_experts
+
+    for token_item in test_token_data_list:
+        token_str = token_item["test_token"]
+        token_id = token_item["test_token_id"]
+        dl = token_item["dl"]
+
+        # For each layer, we'll track:
+        global_counts_per_layer = [torch.zeros(n_experts, dtype = torch.long) for _ in range(n_layers)]
+        token_counts_per_layer = [torch.zeros(n_experts, dtype = torch.long) for _ in range(n_layers)]        
+
+        for i, batch in enumerate(dl):
+            input_ids = batch["input_ids"].to(main_device)
+            attention_mask = batch["attention_mask"].to(main_device)
+
+            outputs = model(input_ids, attention_mask, moe_method = 'forward_slow', use_lflb = False, use_checkpointing = False)
+            all_topk_experts = outputs['all_topk_experts']
+
+            flat_ids = input_ids.view(-1)  # shape B*N
+
+            nonpad_mask = (flat_ids != pad_token_id) # (A) Non-pad
+            token_mask = (flat_ids == token_id) # (B) This specific token
+
+            # For each layer, accumulate counts via bincount
+            for l in range(n_layers):
+                layer_exps = all_topk_experts[l]  # (B*N, topk)
+                
+                # A) Global usage (non-pad) gather only the rows where nonpad_mask is True
+                nonpad_indices = nonpad_mask.nonzero(as_tuple = True)[0]
+                if len(nonpad_indices) > 0:
+                    nonpad_rows = layer_exps[nonpad_indices, :] # shape (#nonpad, top_k)
+                    nonpad_rows = nonpad_rows.view(-1) # flatten => shape (#nonpad*top_k,)
+                    hist_global = torch.bincount(nonpad_rows, minlength = n_experts)
+                    global_counts_per_layer[l] += hist_global.cpu()
+
+                # B) Token usage (token_mask)
+                token_indices = token_mask.nonzero(as_tuple = True)[0]
+                if len(token_indices) > 0:
+                    token_rows = layer_exps[token_indices, :] # shape (#token, top_k)
+                    token_rows = token_rows.view(-1)
+                    hist_token = torch.bincount(token_rows, minlength = n_experts)
+                    token_counts_per_layer[l] += hist_token.cpu()
+                    
+        # Now compute the JS distance for each layer, comparing token_expert_counts vs. global_expert_counts
+        layer_js_list = []
+        for l in range(n_layers):
+            dict_global = {}
+            dict_token = {}
+            global_arr = global_counts_per_layer[l].numpy()
+            token_arr = token_counts_per_layer[l].numpy()
+            # Build dictionaries for get_js_distance
+            for ex_id, count_val in enumerate(global_arr):
+                dict_global[ex_id] = int(count_val)
+            for ex_id, count_val in enumerate(token_arr):
+                dict_token[ex_id] = int(count_val)
+            d_js = get_js_distance(dict_token, dict_global)
+            layer_js_list.append(d_js)
+
+        results[token_str] = {i: val for i, val in enumerate(layer_js_list)}
+        
     return results
