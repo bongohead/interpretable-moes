@@ -7,9 +7,8 @@ import yaml
 import torch
 from torch.utils.data import Dataset, DataLoader
 import math
-from collections import defaultdict
 
-class ContextAwarenessDataset(Dataset):
+class ContextLabeledDataset(Dataset):
     """
     A dataset that loads a polysemantic token file.
      Ensures the token is recognized as exactly one token by the tokenizer, and that each meaning has at least 20
@@ -73,9 +72,10 @@ class ContextAwarenessDataset(Dataset):
         return self.records[idx]
     
 
-def get_context_aware_test_data(search_path: str, tokenizer, max_length: int = 512, batch_size: int = 36) -> list[dict]:
+def get_context_labeled_data(search_path: str, tokenizer, max_length: int = 512, batch_size: int = 16) -> list[dict]:
     """
-    Get a dataloader that returns the polysemantic examples for interpretability testing.
+    Get a dataloader that returns the text examples with assigned token-meaning labels.
+     For use in testing for interpretable expert specialization, via `get_ics` and `get_tis`.
     
     Params:
         @search_path: The file serach path containing YAML files of samples
@@ -125,7 +125,7 @@ def get_context_aware_test_data(search_path: str, tokenizer, max_length: int = 5
 
     dls = []
     for file_path in sorted(yaml_files):
-        ds = ContextAwarenessDataset(file_path = file_path, tokenizer = tokenizer, max_length = max_length)
+        ds = ContextLabeledDataset(file_path = file_path, tokenizer = tokenizer, max_length = max_length)
         if ds is None or len(ds) == 0:
             continue
         dls.append({
@@ -185,183 +185,18 @@ def get_js_distance(counts_p, counts_q):
     return js_dist
 
 @torch.no_grad()
-def get_context_awareness_metric(model, test_token_data_list, main_device):
+def get_ics(model, test_token_data_list, main_device, use_topk1):
     """
-    Compute the CA metric for each test token x layer, using JS distance to compare each meaning-specific expert distribution vs. 
-     the overall distribution for that token. This is the memory-efficient but slower version.
+    Compute the interpretable context specialization (ICS) metric for each test token x layer. This uses JS distance to compare 
+     each meaning-specific expert distribution vs. the overall distribution for that token. This is fast but can be memory intensive; 
+     use lower batch sizes via the `test_token_data_list` object if there are memory issues.
     
     Params:
         @model: The model, must return `all_topk_experts` which is a tuple of length equal to # layers, where each element of
           the tuple is a BN x topk tensor of selected expert IDs.
         @test_token_data_list: A list of dictionaries of the exact format returned by `get_context_aware_test_data`.
-        @main_device: The device to run the forward pass on.
-
-    Returns:
-        A dict of format:
-            {
-                test_token1: {0: .52, 1: .34, ...},
-                test_token2: {0: .55, 1: .62, ...},
-                ...
-            },
-          where the keys represent layer indices and the values represent context-awareness scores between 0 - 1
-    """
-    results = {}
-    model.eval()
-
-    # Number of layers from the model config
-    n_layers = model.conf.n_layers
-
-    for test_item in test_token_data_list:
-        test_token = test_item["test_token"]
-        test_token_id = test_item["test_token_id"]
-        test_meanings = test_item["test_meanings"]
-        dl = test_item["dl"]
-
-        meaning_counts_per_layer = [
-            [defaultdict(int) for _ in range(len(test_meanings))]  # one dict per meaning
-            for _ in range(n_layers)
-        ] # meaning_counts_per_layer[l][meaning_idx][expert_id] -> count per meaning
-        total_counts_per_layer = [defaultdict(int) for _ in range(n_layers)] # total_counts_per_layer[l][expert_id]: count for the all meanings baseline
-
-        # Map each meaning string to an index
-        meaning_to_idx = {m: i for i, m in enumerate(test_meanings)}
-
-        for batch in dl:
-            input_ids = batch["input_ids"].to(main_device)
-            attention_mask = batch["attention_mask"].to(main_device)
-            batch_meanings = batch["test_meanings"]
-            B, N = input_ids.shape
-
-            outputs = model(input_ids, attention_mask, moe_method = 'forward_slow', use_lflb = False, use_checkpointing = False)
-
-            # Flatten the input IDs for indexing alignment with all_topk_experts
-            flat_input_ids = input_ids.view(-1)  # shape (B*N, )
-            
-            for l in range(n_layers):
-                layer_experts = outputs['all_topk_experts'][l]  # shape (B*N, topk)
-
-                for token_index in range(B * N):
-                    if flat_input_ids[token_index].item() == test_token_id:
-                        b_idx = token_index // N # Figure out which example in the batch we belong to
-                        meaning_label = batch_meanings[b_idx]
-                        meaning_idx = meaning_to_idx[meaning_label]
-
-                        # Gather all top-k experts
-                        topk_exs = layer_experts[token_index]  # shape (topk,)
-                        for ex_val in topk_exs:
-                            ex_id = int(ex_val.item())
-                            meaning_counts_per_layer[l][meaning_idx][ex_id] += 1
-                            total_counts_per_layer[l][ex_id] += 1
-
-
-        # Now compute the average JS distance for each layer (comparing each meaning vs. the overall distribution) then averaging
-        layer_js_distances = []
-
-        for l in range(n_layers):
-            layer_sense_dists = []
-            for s_idx in range(len(test_meanings)):
-                d_js = get_js_distance(meaning_counts_per_layer[l][s_idx], total_counts_per_layer[l])
-                layer_sense_dists.append(d_js)
-
-            if len(layer_sense_dists) > 0:
-                avg_js = sum(layer_sense_dists) / len(layer_sense_dists)
-            else:
-                avg_js = 0.0
-
-            layer_js_distances.append(avg_js)
-
-        results[test_token] = {i: val for i, val in enumerate(layer_js_distances)}
-
-    return results
-
-@torch.no_grad()
-def get_token_specialization_metric(model, test_token_data_list, main_device, pad_token_id):
-    """
-    Computes a token specialization metric for each test token x layer, using the JS distance b/t: (a) the distribution of 
-      experts used for that token and (b) the distribution of experts used for *all* tokens (excluding padding). This is the memory-efficient but slower version.
-    
-    Params:
-        @model: The model, must return `all_topk_experts` which is a tuple of length equal to # layers, where each element of
-          the tuple is a BN x topk tensor of selected expert IDs.
-        @test_token_data_list: A list of dictionaries of the exact format returned by `get_context_aware_test_data`.
-        @main_device: The device to run the forward pass on.
-        @pad_token_id: The ID used for padding, which we should exclude from the "global usage" distribution.
-
-    Returns:
-        A dict of format:
-            {
-                test_token1: {0: .52, 1: .34, ...},
-                test_token2: {0: .55, 1: .62, ...},
-                ...
-            },
-          where the keys represent layer indices and the values represent token-specialization scores between 0 - 1
-    """
-
-    model.eval()
-    n_layers = model.conf.n_layers
-
-    results = {}
-
-    for token_item in test_token_data_list:
-        token_str = token_item["test_token"]
-        token_id = token_item["test_token_id"]
-        dl = token_item["dl"]
-
-        # For each layer, we'll track:
-        token_expert_counts = [defaultdict(int) for _ in range(n_layers)] # token_expert_counts[l][expert_id] = # of times `token_id` is assigned to expert_id
-        global_expert_counts = [defaultdict(int) for _ in range(n_layers)] # global_expert_counts[l][expert_id] = # of times ANY non-pad token is assigned to expert_id
- 
-        for batch in dl:
-            input_ids = batch["input_ids"].to(main_device)
-            attention_mask = batch["attention_mask"].to(main_device)
-            B, N = input_ids.shape
-
-            outputs = model(input_ids, attention_mask, moe_method = 'forward_slow', use_lflb = False, use_checkpointing = False)
-
-            flat_ids = input_ids.view(-1)  # shape B*N
-            # for each layer, shape (B*N, topk)
-            for l in range(n_layers):
-                layer_experts = outputs["all_topk_experts"][l]  # (B*N, topk)
-                for idx in range(B*N):
-                    # skip if it's padded
-                    if flat_ids[idx].item() == pad_token_id:
-                        continue
-
-                    # Add global usage counts
-                    topk_exs = layer_experts[idx]
-                    for ex_id_val in topk_exs:
-                        ex_id = int(ex_id_val.item())
-                        global_expert_counts[l][ex_id] += 1
-
-                    # If it's our target token, also track token_expert_counts
-                    if flat_ids[idx].item() == token_id:
-                        for ex_id_val in topk_exs:
-                            ex_id = int(ex_id_val.item())
-                            token_expert_counts[l][ex_id] += 1
-
-        # Now compute the JS distance for each layer, comparing token_expert_counts vs. global_expert_counts
-        layer_js_list = []
-        for l in range(n_layers):
-            d_js = get_js_distance(token_expert_counts[l], global_expert_counts[l])
-            layer_js_list.append(d_js)
-
-        results[token_str] = {i: val for i, val in enumerate(layer_js_list)}
-
-    return results
-
-
-@torch.no_grad()
-def get_context_awareness_metric_fast(model, test_token_data_list, main_device):
-    """
-    This is the FAST version but uses more memory - set low dataloader sizes.
-
-    Compute the CA metric for each test token x layer, using JS distance to compare each meaning-specific expert distribution vs. 
-     the overall distribution for that token.
-    
-    Params:
-        @model: The model, must return `all_topk_experts` which is a tuple of length equal to # layers, where each element of
-          the tuple is a BN x topk tensor of selected expert IDs.
-        @test_token_data_list: A list of dictionaries of the exact format returned by `get_context_aware_test_data`.
+        @main_device: The device to run calculations on.
+        @use_topk1: Whether to only test the topk = 1 expert.
 
     Returns:
         A dict of format:
@@ -401,7 +236,9 @@ def get_context_awareness_metric_fast(model, test_token_data_list, main_device):
 
             outputs = model(input_ids, attention_mask, moe_method = 'forward_slow', use_lflb = False, use_checkpointing = False)
             all_topk_experts = outputs['all_topk_experts']
-            
+            if use_topk1 == True:
+                all_topk_experts = tuple(x[..., :1] for x in all_topk_experts)
+
             flat_ids = input_ids.view(-1)  # shape (B*N, ) # Flatten the input IDs for indexing alignment with all_topk_experts
             
             # Convert each example's meaning label to an integer index shape (B,). e.g. meaning_id_array[b] = meaning_idx of that example
@@ -468,12 +305,11 @@ def get_context_awareness_metric_fast(model, test_token_data_list, main_device):
 
 
 @torch.no_grad()
-def get_token_specialization_metric_fast(model, test_token_data_list, main_device, pad_token_id):
+def get_tis(model, test_token_data_list, main_device, pad_token_id, use_topk1 = False):
     """
-    This is the FAST version but uses more memory - set low dataloader sizes.
-
-    Computes a token specialization metric for each test token x layer, using the JS distance b/t: (a) the distribution of 
-      experts used for that token and (b) the distribution of experts used for *all* tokens (excluding padding).
+    Computes a token ID specialization (TIS) metric for each test token x layer, using the JS distance b/t: (a) the distribution of 
+      experts used for that token and (b) the distribution of experts used for *all* tokens (excluding padding). This is fast 
+      but can be memory intensive; use lower batch sizes via the `test_token_data_list` object if there are memory issues.
     
     Params:
         @model: The model, must return `all_topk_experts` which is a tuple of length equal to # layers, where each element of
@@ -510,7 +346,8 @@ def get_token_specialization_metric_fast(model, test_token_data_list, main_devic
 
             outputs = model(input_ids, attention_mask, moe_method = 'forward_slow', use_lflb = False, use_checkpointing = False)
             all_topk_experts = outputs['all_topk_experts']
-
+            if use_topk1 == True:
+                all_topk_experts = tuple(x[..., :1] for x in all_topk_experts)
             flat_ids = input_ids.view(-1)  # shape B*N
 
             nonpad_mask = (flat_ids != pad_token_id) # (A) Non-pad
@@ -553,4 +390,95 @@ def get_token_specialization_metric_fast(model, test_token_data_list, main_devic
 
         results[token_str] = {i: val for i, val in enumerate(layer_js_list)}
         
+    return results
+
+
+
+@torch.no_grad()
+def get_ec(model, test_token_data_list, main_device, use_topk1 = False):
+    """
+    Computes an expert continuity metric, measuring the fraction of token occurrences
+      of 'test_token' that continue to get routed to the same topk experts in the next layer.
+
+    Args:
+        model: The model object. Must return `all_topk_experts` in `outputs["all_topk_experts"]`,
+               a tuple of length n_layers, each shaped (B*N, top_k).
+        test_token_data_list: The same structure as used for TIS or CA, i.e. a list of dicts:
+            [{
+               "test_token": str,
+               "test_token_id": int,
+               "dl": torch.utils.data.DataLoader
+             }, ...]
+        main_device: The device for the forward pass.
+        pad_token_id: The ID used for padding, which we skip.
+
+    Returns:
+        A dict with format:
+           {
+             "token_str": {0: continuity_value, 1: continuity_value, ... n_layers-1: 0.0},
+             ...
+           }
+        where each continuity_value is in [0..1].
+    """
+    n_layers = model.conf.n_layers
+
+    for token_item in test_token_data_list:
+        token_str = token_item["test_token"]
+        token_id = token_item["test_token_id"]
+        dl = token_item["dl"]
+
+        # overlap_count[l] = number of occurrences that keep at least one expert from layer l->l+1
+        # total_count[l]   = total number of token occurrences we see for layer l
+        overlap_count = [0 for _ in range(n_layers-1)]
+        total_count   = [0 for _ in range(n_layers-1)]
+
+        for batch in dl:
+            input_ids = batch["input_ids"].to(model.device)       # (B,N)
+            attention_mask = batch["attention_mask"].to(model.device)
+
+            outputs = model(input_ids, attention_mask, moe_method = 'forward_slow', use_lflb = False, use_checkpointing = False)
+            all_topk_experts = outputs['all_topk_experts']
+            if use_topk1 == True:
+                all_topk_experts = tuple(x[..., :1] for x in all_topk_experts)
+            flat_ids = input_ids.view(-1)  # shape B*N
+
+            valid_mask = (flat_ids == token_id)
+            valid_indices = valid_mask.nonzero(as_tuple = True)[0]  # 1D array of row indices
+
+            # 3) For each layer up to n_layers - 2, check overlap with layer + 1
+            # We'll gather the topk experts for those valid_indices in layer l and l+1
+            for l in range(n_layers - 1):
+                exps_l     = all_topk_experts[l]    # (BN, top_k)
+                exps_next  = all_topk_experts[l+1]  # (BN, top_k)
+
+                # Gather relevant rows => shape (#valid, top_k)
+                exps_l_valid    = exps_l[valid_indices, :]
+                exps_next_valid = exps_next[valid_indices, :]
+
+                total_count[l] += exps_l_valid.size(0) # total_count[l] += #valid
+
+                # Now check overlap row by row in a vectorized manner.
+                # If top_k = 1, simpler check: just eq
+                if exps_l_valid.size(1) == 1:
+                    same = (exps_l_valid[:, 0] == exps_next_valid[:, 0]) # shape (#valid,)
+                    overlap_count[l] += same.sum().item()
+                else:
+                    # exps_l_valid, exps_next_valid: both shape (#valid, top_k)
+                    # We'll do a broadcast eq => shape (#valid, top_k, top_k).
+                    # If ANY of [top_k x top_k] is True => there's intersection.
+                    # Then we reduce "any" across dims 1 & 2 => shape (#valid,).
+                    # We'll sum up how many are True => that many have overlap.
+                    exps_l_3d = exps_l_valid.unsqueeze(2) # shape (#valid, top_k, 1)
+                    exps_next_3d = exps_next_valid.unsqueeze(1) # shape (#valid, 1, top_k)
+                    eq_matrix = (exps_l_3d == exps_next_3d) # eq => shape (#valid, top_k, top_k)
+                    overlap_bool = eq_matrix.any(dim=(1,2))  # overlap => shape (#valid,)
+                    overlap_count[l] += overlap_bool.sum().item()
+
+        continuity_dict = {}
+        for l in range(n_layers - 1):
+            continuity_dict[l] = overlap_count[l] / total_count[l]
+            
+        continuity_dict[n_layers-1] = 0.0 # define last layer's continuity=0.0
+
+        results[token_str] = continuity_dict
     return results
