@@ -144,3 +144,14 @@ def get_gradient_stats(model, VANISHING_THRESHOLD: float = 1e-5, EXPLODING_THRES
             stats[group]["mean_norm"] = float(np.mean(norms))
 
     return stats
+
+
+@torch.no_grad()
+def get_cosine_similarity(model, model_conf):
+    """
+    Compute the cosine similarity of the gate weights of each layer.
+    """
+    cos_similarity_matrices = []
+    for layer in model.layers:
+        cos_similarity_matrices.append(check_cosine_similarity(layer.moe.gate.weight))
+    return cos_similarity_matrices

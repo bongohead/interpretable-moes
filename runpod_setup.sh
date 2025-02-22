@@ -8,6 +8,9 @@ apt update -y \
 # Install nano
 apt install -y nano
 
+# Install tmux
+apt install -y tmux
+
 # Upgrade/install Jupyter Lab and widgets
 pip install --upgrade jupyterlab ipywidgets jupyterlab-widgets
 
