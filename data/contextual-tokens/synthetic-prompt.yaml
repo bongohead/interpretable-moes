@@ -14,18 +14,18 @@
 
     Here is the token and meanings for you to use:
 
-    "match": ignition stick, sports event, a correspondence concept
+    " match": ignition stick, sports event, a correspondence concept
 
     Next, reason through the following steps, step by step:
 
       1. First, convert these 3 meanings into 3 meaning labels. These should be similar to the provided meanings, but more specific and precise, and with no special characters or spaces, just underscores.
 
-      2. For each meaning label, think very carefully about different formatting/content/sources of TEXT SAMPLES and their distribution. Remember, the distribution should be roughly similar to their actual distribution in scraped data. Don't just include obvious sources, but also unusual formatting that you would expect in scraped data. Don't limit yourself to just basic natural language texts.
+      2. For each meaning label, think very carefully about different formatting/content/sources of TEXT SAMPLES and their distribution. Remember, the distribution should be roughly similar to their actual distribution in scraped data. Don't just include obvious sources, but also unusual formatting that you would expect in scraped data.
 
       For example, suppose the token is "=" and the meaning label is "programming_assignment". Then, your distribution might be something like this: pure scraped code in different languages (40%), instructional coding textbooks or blogs (10%), config files (5%), Stackoverflow responses that still contain raw HTML in them (5%), Markdown-formatted Wikipedia articles with coding examples (2%), git diffs (2%), user-assistant LLM chats about a coding problem (2%), humorous social media comments about coding (2%), error logs showing variable states (1%), email mailing lists with code copy pasted (1%), etc.
 
       3. Next, for each meaning, generate exactly 25 TEXT SAMPLES from the formatting/content/source distribution you specified. Follow the below guidelines:
-      - NEVER describe the source or context for each TEXT SAMPLE, just generate the TEXT SAMPLE directly.
+      - NEVER describe the source or context for each TEXT SAMPLE, just generate the TEXT SAMPLE directly. NEVER start each TEXT SAMPLE with an introduction or description of the source!
       - Each TEXT SAMPLE should be 100 - 250 tokens long. Vary the length greatly across TEXT SAMPLES.
       - Each TEXT SAMPLE should may use the token once or multiple times, but each time it must be used with the correct meaning. Remember to use the exact spacing/capitalization of the token provided to you!
       - TEXT SAMPLES should be diverse and messy, representing a wide variety of different sources, formats, formatting, and contexts. For example, they can be conversational transcripts, pieces of code, scraped text blobs with residual HTML formatting, Wikipedia articles, textbook pages, text conversations, news articles, strangely formatted copy-pasted text, conversational dialogue, chats mixed with emojis, academic journals, raw code comments, grocery lists, and so on.
@@ -47,7 +47,7 @@
         - meaning_label: "punctuation_emphasis"
           text_samples: 
             - "to the remote Git server. Make work as state-independent as possible, as everything not saved in Git will be destroyed every time the cloud server is turned off. Note: Hidden files aren't shown in the Jupyter lab file sidebar (you'll have to use `nano`), so be careful managing \".env\" - make sure you don't commit secrets to your Git repo! If you create a secrets file, download it to your local computer when you're finished with your work, as it'll be destroyed since it's outside"
-            - "Whippets are sometimes confused for Greyhounds because they have a similar, graceful body - but generally slender Whippets are smaller and less muscular. \n\nThey have short, sleek fur and long, slender legs, plus a deep chest that is similar to the Greyhound's. Their coat is short and smooth, and comes in a variety of colors and combinations. The most common hues you’ll find Whippets coming in are black, red, cream, white, red, fawn, blue, brindle - and everything in between! They're also known to have a plethora of spots and color patches, which keeps things even more interesting."
+            - "Whippets are sometimes confused for Greyhounds because they have a similar, graceful body - but generally slender Whippets are smaller and less muscular. \n\nThey have short, sleek fur and long, slender legs, plus a deep chest that is similar to the Greyhound's. Their coat is short and smooth, and comes in a variety of colors and combinations. The most common hues you'll find Whippets coming in are black, red, cream, white, red, fawn, blue, brindle - and everything in between! They're also known to have a plethora of spots and color patches, which keeps things even more interesting."
             - "[9:02 AM] Sam: I just got word there's another glitch in the router logs 😓. Any update on that weird bug we saw last night? [9:03 AM] Alex: No big breakthroughs yet. Seems like a stray config issue or something leftover from the old firmware. I can check if there's any mismatch in the system logs, but it might take a while. [9:04 AM] Sam: No worries. Try power cycling the entire system when you can. Let me know if that helps, and if it doesn't, we'll have to escalate. [9:05 AM] Sam: We have to get this fixed asap! [10:00 AM] Alex: Any progress??"
             - "<h1>Americans have always sought debt relief after the holidays<h1>\n<span id="subtitle">Now their struggle is year-round. Overall household debt climbed to a new high of $18.04 trillion in the fourth quarter, the New York Fed reported.</span><div>\n\n<a class="author may-blank id-t2_kc7k9">beer_bongo</a><blockquote>\n<p>In general, a car payment should take up no more than 13%-14% of an individual's net income, Russell said. But with the average payment for used cars at $525 and for new cars at $734, per&nbsp;<a href="https://www.experian.com/blogs/ask-experian/average-used-car-payment/">Experian</a>, that rule of thumb is out the window.</p>\n<p>"We're seeing individuals paying 21%-22% of their income toward car payments. That's almost a quarter of your income just servicing an automobile loan payment," Russell said. "That's not sustainable."</p>\n<p>The term lengths on these loans have also increased to 78 months when they used to be 48 to 60 months long, Russell said, meaning people are stuck with unmanageable payments for more than six years.</p>\n</blockquote><p>7 years of payments at $750 should get you a nice semi luxury models? Not sure why people who can't afford it are buying these 40k vehicles in the first place! Why not get a 25k Toyota Corolla?</p>\n</div>"
             - "the efficient fitting of neural networks is startling, their generalization to new data is dumbfounding. First, it's not obvious a priori that typical datasets are sufficient to characterize the input/output mapping. The curse of dimensionality implies that thetraining dataset is tiny compared to the possible inputs; if each of the 40 inputs of theMNIST-1D data were quantized into 10 possible values, there would be 1040 possible inputs, which is a factor of 1036 more than the number of training examples! Second, deep networks describe very complicated functions."
@@ -78,4 +78,6 @@
   - " root": unix superuser, plant anatomy, mathematical root
   - " second": unit of time, numberical position after first, to formally support a notion
   - " shell": sea shell, command line shell, explosive
-  - " PR": pull request, public relations, personal record
+- replacements:
+  - “|” -> \"
+  - ‘|’ -> '
