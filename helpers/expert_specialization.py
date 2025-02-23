@@ -185,7 +185,7 @@ def get_js_distance(counts_p, counts_q):
     return js_dist
 
 @torch.no_grad()
-def get_ics(model, test_token_data_list, main_device, use_topk1):
+def get_ics(model, test_token_data_list, main_device, use_topk1 = False):
     """
     Compute the interpretable context specialization (ICS) metric for each test token x layer. This uses JS distance to compare 
      each meaning-specific expert distribution vs. the overall distribution for that token. This is fast but can be memory intensive; 
@@ -397,20 +397,20 @@ def get_tis(model, test_token_data_list, main_device, pad_token_id, use_topk1 = 
 @torch.no_grad()
 def get_ec(model, test_token_data_list, main_device, use_topk1 = False):
     """
-    Computes an expert continuity metric, measuring the fraction of token occurrences
-      of 'test_token' that continue to get routed to the same topk experts in the next layer.
+    Computes an expert continuity metric, measuring the fraction of token occurrences of test tokens that continue to get routed to 
+     the same topk experts in the next layer. Note that `get_ec_all_tokens` below performs a similar calculation, but across ALL tokens.
 
-    Args:
-        model: The model object. Must return `all_topk_experts` in `outputs["all_topk_experts"]`,
+    Params:
+        @model: The model object. Must return `all_topk_experts` in `outputs["all_topk_experts"]`,
                a tuple of length n_layers, each shaped (B*N, top_k).
-        test_token_data_list: The same structure as used for TIS or CA, i.e. a list of dicts:
+        @test_token_data_list: The same structure as used for TIS or CA, i.e. a list of dicts:
             [{
                "test_token": str,
                "test_token_id": int,
                "dl": torch.utils.data.DataLoader
              }, ...]
-        main_device: The device for the forward pass.
-        pad_token_id: The ID used for padding, which we skip.
+        @main_device: The device for the forward pass.
+        @pad_token_id: The ID used for padding, which we skip.
 
     Returns:
         A dict with format:
@@ -420,6 +420,8 @@ def get_ec(model, test_token_data_list, main_device, use_topk1 = False):
            }
         where each continuity_value is in [0..1].
     """
+    results = {}
+
     n_layers = model.conf.n_layers
 
     for token_item in test_token_data_list:
@@ -433,8 +435,8 @@ def get_ec(model, test_token_data_list, main_device, use_topk1 = False):
         total_count   = [0 for _ in range(n_layers-1)]
 
         for batch in dl:
-            input_ids = batch["input_ids"].to(model.device)       # (B,N)
-            attention_mask = batch["attention_mask"].to(model.device)
+            input_ids = batch["input_ids"].to(main_device)       # (B,N)
+            attention_mask = batch["attention_mask"].to(main_device)
 
             outputs = model(input_ids, attention_mask, moe_method = 'forward_slow', use_lflb = False, use_checkpointing = False)
             all_topk_experts = outputs['all_topk_experts']
@@ -448,11 +450,11 @@ def get_ec(model, test_token_data_list, main_device, use_topk1 = False):
             # 3) For each layer up to n_layers - 2, check overlap with layer + 1
             # We'll gather the topk experts for those valid_indices in layer l and l+1
             for l in range(n_layers - 1):
-                exps_l     = all_topk_experts[l]    # (BN, top_k)
-                exps_next  = all_topk_experts[l+1]  # (BN, top_k)
+                exps_l = all_topk_experts[l]    # (BN, top_k)
+                exps_next = all_topk_experts[l+1]  # (BN, top_k)
 
                 # Gather relevant rows => shape (#valid, top_k)
-                exps_l_valid    = exps_l[valid_indices, :]
+                exps_l_valid = exps_l[valid_indices, :]
                 exps_next_valid = exps_next[valid_indices, :]
 
                 total_count[l] += exps_l_valid.size(0) # total_count[l] += #valid
@@ -482,3 +484,127 @@ def get_ec(model, test_token_data_list, main_device, use_topk1 = False):
 
         results[token_str] = continuity_dict
     return results
+
+@torch.no_grad()
+def get_ec_all_tokens(all_topk_experts: list[torch.Tensor], attention_mask: torch.Tensor, n_experts: int, max_steps: int = 2):
+    """
+    Description: 
+        Define the cross-expert continuity CE(s) is defined as the aggregate percentage of tokens that remain in the 
+        same expert e across layers ll through l+s, averaged (or summed) across all layers l and experts e.
+
+        Unlike the above `get_ec`, this calculates the ECs across all tokens, instead of just a subset.
+
+    Params:
+        @all_topk_experts: tuple of length K (# of layers), where all_topk_experts[l] is shape (BN, top_k).
+        @n_experts: Total number of (non-shared) experts.
+        @max_steps: For multi-step continuity, how many consecutive layers to track.
+        @attention_mask: The standard B x N attention mask.
+
+    Example:
+        get_rrs_expert_continuity(output['all_topk_experts'], inputs['attention_mask'], 15, 4)
+
+    Returns:
+        A dict {1: .5, 2: .2, etc} => At any given token at layer l at expert e, 50% of the tokens 
+        Note: With a random init and topk=3, n_experts=15, you will typically get a cross_layer_expert_metric[1] of around 35-45%, not 3/15 = 20%. This is because layers will be correlated - hidden states are still correlated across layers, even with randominit!
+    """
+    L = len(all_topk_experts)
+    attention_mask = (attention_mask.view(-1) == 1) # Cast to (BN)
+    T = attention_mask.size(0)
+
+    # ----- 1) Build sets of token indices S[l][e] -----
+    sets_per_layer = []
+    for l in range(L):
+        topk_l = all_topk_experts[l]  # shape (T, top_k)
+        expert_sets = [set() for _ in range(n_experts)]
+        for t in range(T):
+            if not attention_mask[t].item():
+                continue
+            chosen_exps = topk_l[t].tolist()
+            for e in chosen_exps:
+                expert_sets[e].add(t)
+        sets_per_layer.append(expert_sets)
+
+    # ----- 2) Multi-step continuity -----
+    # `Get a 3D structure [L][e][step] => At L, fraction a  e at staying at e for up to step layers
+    multi_cont = [ [dict() for _ in range(n_experts)] for _ in range(L)]
+    for l in range(L):
+        for e in range(n_experts):
+            base = sets_per_layer[l][e]
+            denom = len(base)
+            if denom == 0:
+                for st in range(1, max_steps+1):
+                    multi_cont[l][e][st] = 0.0
+                continue
+            running = base
+            for st in range(1, max_steps+1):
+                nxt = l + st
+                if nxt >= L:
+                    multi_cont[l][e][st] = 0.0
+                else:
+                    running = running.intersection(sets_per_layer[nxt][e])
+                    multi_cont[l][e][st] = len(running) / denom
+
+    # ----- 3) Cross-Layer, Cross-Expert Metric -----
+    # metric[st] = fraction of all (layer l, expert e, token t) usage events that remain with the same expert e for st consecutive layers
+    # (only counting usage events that can measure st steps).
+    consecutive_sequences = [0] * (max_steps + 1)
+    matched_sequences = [0] * (max_steps + 1)
+
+    for l in range(L):
+        for e in range(n_experts):
+            base = sets_per_layer[l][e]
+            # For each token t in expert e at layer l
+            for t in base:
+                # Try st in [1..max_steps]
+                for st in range(1, max_steps + 1):
+                    # Must have enough layers to measure st steps
+                    if l + st >= L:
+                        break
+                    consecutive_sequences[st] += 1
+
+                    # Check if token t remains in expert e for next st layers
+                    keep = True
+                    for i in range(1, st + 1):
+                        if t not in sets_per_layer[l + i][e]:
+                            keep = False
+                            break
+                    if keep:
+                        matched_sequences[st] += 1
+
+    # Convert to fraction
+    cross_layer_expert_metric = {}
+    for st in range(1, max_steps + 1):
+        if consecutive_sequences[st] == 0:
+            cross_layer_expert_metric[st] = 0.0
+        else:
+            cross_layer_expert_metric[st] = (matched_sequences[st] / consecutive_sequences[st])
+
+    # Return everything, including the new metrics
+    return cross_layer_expert_metric  # fraction of (l,e) with >=1 token
+
+
+@torch.no_grad()
+def get_cos_sim(model, model_conf, main_device):
+    """ 
+    Check cosine similarity
+    """
+    def check_cosine_similarity(weights):
+        """
+        weights: weight matrix on one router: [n_experts, D]
+        """    
+        weights_normalized = torch.nn.functional.normalize(weights, p=2, dim=1).to(dtype=torch.float32)
+        cos_sim = torch.matmul(weights_normalized, weights_normalized.t())
+        return cos_sim
+
+    sim_matrices = [check_cosine_similarity(model.layers[i].moe.gate.weight) for i in range(model_conf.n_layers)]
+    identity_matrix = torch.eye(model_conf.n_experts).to(main_device)
+    distances = [
+        torch.norm(sim_matrix - identity_matrix, p = 'fro') / model_conf.n_experts * math.sqrt(model_conf.D)  # Normalize by number of experts and sqrt of hidden dimension
+        for sim_matrix in sim_matrices
+        ]
+    
+    mean_distance = torch.mean(torch.stack(distances)).detach().cpu().item()
+    return {
+        'mean_distance': mean_distance, 
+        'distance_by_layer': [x.detach().cpu().item() for x in distances]
+    }
