@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Install necessary packages
-pip install torch==2.5.1
+pip install torch==2.6.0 # updated from 2.5.1 to 2.6.0
 pip install bitsandbytes==0.45.2
 pip install transformers==4.48.3
 pip install accelerate==1.3.0

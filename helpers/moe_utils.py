@@ -59,15 +59,52 @@ def load_balancing_loss_func(gate_logits, num_experts, top_k, attention_mask):
     return overall_loss * num_experts
 
 
+def gap_loss_func(gate_logits, top_k, attention_mask, upper_bound):
+    """
+    Compute the gap loss for the gate logits.
+    shape of gate_logits[i]: [batch_size * sequence_length, n_experts]
+    """
+    compute_device = gate_logits[0].device
+    concatenated_gate_logits = torch.cat([layer_gate.to(compute_device) for layer_gate in gate_logits], dim=0)
+    routing_weights = torch.nn.functional.softmax(concatenated_gate_logits, dim=-1)
+    
+    topk_vals, _ = torch.topk(routing_weights, k=top_k+1, dim=-1) # ensure topk < n_experts 
+    k_plus_1_vals = topk_vals[..., -2] - topk_vals[..., -1]  
+    
+    gap_loss = -torch.log(torch.clamp(k_plus_1_vals, max = upper_bound) + 1e-8)
+    
+    if attention_mask is not None:
+        
+        batch_size, sequence_length = attention_mask.shape
+        num_hidden_layers = concatenated_gate_logits.shape[0] // (batch_size * sequence_length)
+        loss_mask = attention_mask[None, :, :].expand((num_hidden_layers, batch_size, sequence_length)).reshape(-1).to(compute_device)
+        gap_loss = gap_loss * loss_mask
+        valid_tokens = torch.sum(loss_mask)
+    else:
+        valid_tokens = gap_loss.numel()
+    
+    
+    total_loss = torch.sum(gap_loss) / valid_tokens
+    return total_loss
+    
 def check_cosine_similarity(weights):
     """
-    weights: weight matrix on one router: [n_experts, D]
+    weights: weight matrix on one router: [n_experts, dimension of the weight]
     """    
     weights_normalized = torch.nn.functional.normalize(weights, p=2, dim=1).to(dtype=torch.float32)
     cos_sim = torch.matmul(weights_normalized, weights_normalized.t())
     return cos_sim
 
-def cos_loss_func(model, model_conf):
+def check_cosine_similarity_per_token(activations):
+    """
+    activations: [n_tokens, top_k, dimension of the weight]
+    """    
+    activations_normalized = torch.nn.functional.normalize(activations, p=2, dim=-1).to(dtype=torch.float32)
+    cos_sim = torch.matmul(activations_normalized, activations_normalized.transpose(-1, -2))
+    return cos_sim
+
+
+def router_cos_loss_func(model, model_conf):
     sim_matrices = [check_cosine_similarity(model.layers[i].moe.gate.weight) for i in range(model_conf.n_layers)]
     identity_matrix = torch.eye(model_conf.n_experts).to(model_conf.main_device)
     distances = [
@@ -77,3 +114,102 @@ def cos_loss_func(model, model_conf):
     
     mean_distance = torch.mean(torch.stack(distances))
     return mean_distance, distances
+
+
+def expert_cos_loss_func(model, model_conf):
+    expert_weights_per_layer = []
+    for layer in model.layers:
+        layer_weights = []
+        for expert in layer.moe.experts:
+            layer_weights.append(expert.return_flattened_weights())
+        expert_weights_per_layer.append(torch.stack(layer_weights)) # each element in the list is a tensor of shape [n_experts, D]
+    
+    sim_matrices = [check_cosine_similarity(layer_weights) for layer_weights in expert_weights_per_layer]
+    
+    identity_matrix = torch.eye(model_conf.n_experts).to(model_conf.main_device)
+
+    distances = [
+        torch.norm(sim_matrix - identity_matrix, p='fro') / (model_conf.n_experts) * math.sqrt(model_conf.D * model_conf.I * 3) # ignore the normalization factor for dimension
+        for sim_matrix in sim_matrices
+    ]
+    mean_distance = torch.mean(torch.stack(distances))
+    return mean_distance, distances
+
+def differentiable_gram_schmidt(weights, use_random_order=True, keep_magnitude=True, eps=1e-8):
+    """
+    Perform a fully differentiable Gram–Schmidt orthogonalization on the rows of a weight matrix.
+    
+    Args:
+        weights (Tensor): A 2D tensor of shape (num_vectors, vector_dim).
+        use_random_order (bool): If True, process the vectors in a random order.
+                                 Otherwise, process them sequentially.
+        keep_magnitude (bool): If True, scale the orthogonalized vector to have the same magnitude as the original.
+                               If False, return unit-norm orthogonal vectors.
+        eps (float): A small constant to avoid division by zero.
+        
+    Returns:
+        Tensor: A new tensor of the same shape with orthogonalized rows.
+    """
+    num_vectors, num_features = weights.shape
+    assert num_vectors <= num_features, "number of vectors should be less than or equal to the number of features"
+    # Choose processing order.
+    if use_random_order:
+        perm = torch.randperm(num_vectors)
+    else:
+        perm = torch.arange(num_vectors)
+    
+    new_weights = torch.empty_like(weights)
+    orthonormal_list = []  # To store the processed vectors
+    
+    # Process each vector in the chosen order.
+    for idx in perm:
+        original_vector = weights[idx]
+        v = original_vector.clone()
+        # Subtract projections onto all previously processed vectors.
+        for u in orthonormal_list:
+            v = v - torch.dot(v, u) * u
+        # Compute norm after removing components.
+        norm_v = torch.norm(v) + eps
+        u_new = v / norm_v
+        orthonormal_list.append(u_new)
+        if keep_magnitude:
+            original_norm = torch.norm(original_vector)
+            new_weights[idx] = u_new * original_norm
+        else:
+            new_weights[idx] = u_new
+
+    return new_weights
+
+
+def representation_orthogonal_loss_func(hidden_states, conf):
+    """
+    Compute the representation orthogonal loss for the hidden states.
+    """
+    
+    compute_device = hidden_states[0].device
+    total_tokens, top_k, D = hidden_states[0].shape
+    identity_matrix = torch.eye(top_k).to(compute_device)
+    
+    # Compute the loss for each hidden state and store in a list
+    losses = [
+        torch.mean(
+            torch.norm(
+                zero_diagonal((check_cosine_similarity_per_token(hidden_state) - identity_matrix)), # ignore the diagonal part
+                p='fro', dim=(-2, -1)
+            ) / top_k * math.sqrt(D)
+        )
+        for hidden_state in hidden_states
+    ]
+    
+    # Average the total loss over all layers
+    mean_loss = torch.mean(torch.stack(losses))
+    return mean_loss, losses
+        
+def zero_diagonal(tensor):
+    """
+    Zero out the diagonal of a 3d tensor.
+    """
+    n_slices, m, _ = tensor.shape
+    indices = torch.arange(m, device=tensor.device)
+    tensor[:, indices, indices] = 0
+    return  tensor

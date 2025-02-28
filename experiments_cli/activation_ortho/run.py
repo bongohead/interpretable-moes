@@ -7,7 +7,7 @@ import math
 from helpers.memory import check_memory, profile_memory
 from helpers.logging import get_gradient_stats
 from helpers.moe_utils import check_cosine_similarity
-from helpers.dataset import load_shard_as_dataloader
+from helpers.dataset import load_shard_as_dataloader_mp
 from dataclasses import dataclass, asdict
 import time
 from collections import defaultdict
@@ -17,37 +17,47 @@ import json
 from datetime import datetime
 from transformers import AutoTokenizer
 
-from config import ModelConf, TrainConf
+from config import ModelConf, TrainConf, OrthoMappingConf
 from moe import OlmoeModel
 from train import train
 
 
-check_memory()
-
-
-RUN_NAME = 'test-01 -single-gpu -experts-32 -topk-4 -forward-slow'
-RUN_NOTES = 'Baseline test with routing orthogonal initialization and no gate update'
-
+RUN_NAME = 'baseline_small, different seed'
+RUN_NOTES = 'small, different seed'
+save_dir = 'baseline_small_different_seed'
 
 model_conf = ModelConf(
     D = 768, 
-    H = 8,
-    I = 512,
-    n_experts = 30,
-    n_shared_experts = 2,
-    top_k = 4,
+    H = 12,
+    I = 3072,
+    n_experts = 16,
+    n_shared_experts = 0,
+    top_k = 2,
     norm_topk_prob = False,
-    n_layers = 10,
-    max_position_embeddings = 2048,
-    gate_orthogonal = True,
-    is_freeze_weights = False,
+    n_layers = 12,
+    max_position_embeddings = 1024,
     main_device = 'cuda:0'
 )
 
 train_conf = TrainConf(
-    router_cos_loss_coef = 0.01,
+    micro_batch_size = 64,
+    accumulation_steps = 8,
+    seq_len = 1024, 
+    use_lflb = False,
+    gap_loss_coef = 0,
+    router_aux_loss_coef = 0,
+    ortho_loss_coef = 0.1
 )
-seed = 1234
+
+or_conf = OrthoMappingConf(
+    is_gate_orthogonal_init = False,
+    is_freeze_gate_weights = False,
+    router_cos_loss_coef = 0,
+    expert_cos_loss_coef = 0
+
+)
+
+seed = 3456
 
 
 """ 
@@ -63,6 +73,7 @@ torch.manual_seed(seed)
 
 model = OlmoeModel(
     model_conf,
+    or_conf,
     primary_device = model_conf.main_device, # Where to store dense layers and shared experts
     expert_device_map = [model_conf.main_device] * model_conf.n_experts #=, here let's test them with all of them on cuda:0
 )
@@ -76,14 +87,13 @@ check_memory()
 Setup a Wandb run for logging. Choose a run name and notes for the run!
 """
 
-
 load_dotenv('./../../secrets.env')
 wandb.login(key = os.getenv('WANDB_API_KEY'))
 run = wandb.init(
     project = 'interpretable-moes', 
     name = RUN_NAME,
     notes = RUN_NOTES,
-    config = {**asdict(model_conf), **asdict(train_conf)}
+    config = {**asdict(model_conf), **asdict(train_conf), **asdict(or_conf)}
 )
 
 # (Optional) Also log various info as a wandb media object.
@@ -94,13 +104,14 @@ additional_log_notes = {
     'total_model_params': sum(p.numel() for p in model.parameters()),
     'available_cuda_gpus': [torch.cuda.get_device_properties(i).name for i in range(torch.cuda.device_count())],
     'model_conf': asdict(model_conf),
-    'train_conf': asdict(train_conf)
+    'train_conf': asdict(train_conf),
+    'or_conf': asdict(or_conf)
 }
 
 wandb.log({'conf': wandb.Html(f"<pre style='font-size:12px;'>{json.dumps(additional_log_notes, indent = 2)}</pre>")})
 
 
-val_dl = load_shard_as_dataloader(
+val_dl = load_shard_as_dataloader_mp(
     './../../data/val_shard.json',
     tokenizer,
     batch_size = 32,
@@ -108,5 +119,5 @@ val_dl = load_shard_as_dataloader(
     eos_seperator_id = tokenizer.eos_token_id
 )
 
-train(model, tokenizer, train_conf, model_conf, val_dl, seed)
+train(model, tokenizer, train_conf, model_conf, or_conf, val_dl, seed, save_dir)
 wandb.finish()

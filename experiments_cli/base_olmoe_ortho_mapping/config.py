@@ -20,8 +20,10 @@ class ModelConf:
     max_position_embeddings: int = 4096 # Base OlMoE: 4096 (this is something needed for ROPE)
     attn_method: str = 'fa2' # In OlMoE this is chosen automatically, here we explicitly pass it - choose 'normal', 'sdpa', or 'fa2'
     gate_orthogonal: bool = True # whether to orthogonalize the gate weights
-    main_device = 'cuda:0' # Main device for model
-    is_freeze_weights: bool = False # whether to freeze the weights
+    main_device: str = 'cuda:0' # Main device for model
+    is_freeze_weights: bool = False # whether to freeze the weights, default is False
+    keep_magnitude: bool = True # whether to keep the magnitude of the orthogonalized weights, default is True
+    use_random_order: bool = True # whether to use random order for orthogonalization, default is True
 
 """ 
 Set training constants to be used for training later.
@@ -31,9 +33,9 @@ Set training constants to be used for training later.
 class TrainConf:
     router_aux_loss_coef: float = 0.01  # Base OlMoE: 0.01 (relative weight of balancing loss)
     router_cos_loss_coef: float = 0.01 # (relative weight of cosine similarity loss)
-    use_lflb: bool = True # Use loss-free load balancing
+    use_lflb: bool = False # Use loss-free load balancing
     bias_update_rate: float = .002 # Bias update rate for lflb
-    lr: float = 0.0012 # The starting LR (after warmup)
+    lr: float = 5e-4 # The starting LR (after warmup)
     min_lr: float = 5e-5 # The minimum LR
     warmup_steps: int = 500 # How long it takes to warmup to the starting LR
     decay_steps: int = 19500 # How long it takes to decay from the starting LR to the minimum LR
@@ -41,5 +43,5 @@ class TrainConf:
     max_expert_grad_norm: float = 1.0 # Gradient clipping for expert grads
     micro_batch_size: int = 64 # Size of a microbatch
     accumulation_steps: int = 4 # Number of microbatches within a batch
-    seq_len: int = 2048 # The sequence length (exceeds the current limit set by TRITON_MAX_BLOCK['X'] if using 4096)
+    seq_len: int = 1024 # The sequence length (exceeds the current limit set by TRITON_MAX_BLOCK['X'] if using 4096)
 

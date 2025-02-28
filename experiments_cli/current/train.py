@@ -133,7 +133,9 @@ def train(model, tokenizer, train_conf, model_conf, or_conf, val_dl, seed, save_
                 start_fwd = time.time()
                 outputs = model(mb_input_ids, mb_attn_mask, moe_method = 'forward_slow', use_lflb = train_conf.use_lflb, use_checkpointing = True)
 
-                loss = outputs['base_loss'] + train_conf.router_aux_loss_coef * outputs['aux_loss']
+                # ---------------------- Calculate Loss ----------------------
+                loss = outputs['base_loss'] + train_conf.router_aux_loss_coef * outputs['aux_loss'] + train_conf.gap_loss_coef * outputs['gap_loss'] \
+                    + train_conf.ortho_loss_coef * outputs['ortho_loss']
                 fwd_time = time.time() - start_fwd
                 total_fwd_time += fwd_time
 
@@ -194,10 +196,14 @@ def train(model, tokenizer, train_conf, model_conf, or_conf, val_dl, seed, save_
                 'aux_coef': train_conf.router_aux_loss_coef,
                 'router_cos_coef': or_conf.router_cos_loss_coef,
                 'expert_cos_coef': or_conf.expert_cos_loss_coef,
+                'gap_coef': train_conf.gap_loss_coef,
+                'ortho_coef': train_conf.ortho_loss_coef,
                 'train': {
                     'loss': avg_loss,
                     'base_loss': outputs['base_loss'].detach().cpu().item(), # From last microbatch only
                     'aux_loss':  outputs['aux_loss'].detach().cpu().item(), # From last microbatch only
+                    'gap_loss': outputs['gap_loss'].detach().cpu().item(), # From last microbatch only
+                    'ortho_loss': outputs['ortho_loss'].detach().cpu().item(), # From last microbatch only
                     'router_cos_loss':  router_cos_loss.detach().cpu().item(),
                     'expert_cos_loss':  expert_cos_loss.detach().cpu().item()
                 },
@@ -218,6 +224,11 @@ def train(model, tokenizer, train_conf, model_conf, or_conf, val_dl, seed, save_
                 for layer_idx, expert_cos_loss_layer in enumerate(expert_cos_loss_per_layer):
                     expert_cos_dict_final[layer_idx] = expert_cos_loss_layer.detach().cpu().item()
                 metrics['expert_cos_loss'] = expert_cos_dict_final
+                
+                ortho_dict_final = {}
+                for layer_idx, ortho_loss_layer in enumerate(outputs['ortho_loss_per_layer']):
+                    ortho_dict_final[layer_idx] = ortho_loss_layer.detach().cpu().item()
+                metrics['ortho_loss'] = ortho_dict_final
                 
                 # Convert usage_accum (list of defaultdicts) into a more standard dict for logging
                 usage_dict_final = {}

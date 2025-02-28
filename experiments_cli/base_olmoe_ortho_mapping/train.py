@@ -1,4 +1,5 @@
 import os
+
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -8,7 +9,7 @@ import math
 from helpers.memory import check_memory, profile_memory
 from helpers.logging import get_gradient_stats, get_cosine_similarity
 from helpers.dataset import load_shard_as_dataloader_mp
-from helpers.moe_utils import router_cos_loss_func, expert_cos_loss_func
+from helpers.moe_utils import cos_loss_func
 from dataclasses import dataclass, asdict
 import time
 from collections import defaultdict
@@ -58,7 +59,7 @@ def get_val_stats(model, val_dl, router_aux_loss_coef, model_conf):
     }
 
 
-def train(model, tokenizer, train_conf, model_conf, or_conf, val_dl, seed, save_dir):
+def train(model, tokenizer, train_conf, model_conf, val_dl, seed, save_dir):
     """
     Let's train the model.
     - The training loop will loop through training data shards. Each shard will be loaded and concatenated into chunks of size seq_len.
@@ -105,15 +106,7 @@ def train(model, tokenizer, train_conf, model_conf, or_conf, val_dl, seed, save_
 
             # ====================== ZERO GRAD ONCE PER "BIG BATCH" ======================
             optimizer.zero_grad()
-            
-            # ====================== COMPUTE COSINE LOSS ====================== 
-            # Note this is independent of the forward pass. So only needs to be computed once per "big batch"
-            router_cos_loss, router_cos_loss_per_layer = router_cos_loss_func(model, model_conf) # cos_loss_per_layer is a list of tensors, one per layer
-            weighted_router_cos_loss = or_conf.router_cos_loss_coef * router_cos_loss
-            
-            expert_cos_loss, expert_cos_loss_per_layer = expert_cos_loss_func(model, model_conf)
-            weighted_expert_cos_loss = or_conf.expert_cos_loss_coef * expert_cos_loss
-            
+                    
             # We'll track times and losses across micro-batches
             total_fwd_time = 0.0
             total_bwd_time = 0.0
@@ -157,14 +150,6 @@ def train(model, tokenizer, train_conf, model_conf, or_conf, val_dl, seed, save_
 
                 total_loss_val += loss.item()
             
-            # ======================= BACKWARD PASS for COS loss =======================
-            start_cos_bwd = time.time()
-            weighted_router_cos_loss.backward()
-            weighted_expert_cos_loss.backward()
-            cos_bwd_time = time.time() - start_cos_bwd
-            total_bwd_time += cos_bwd_time
-            total_loss_val += weighted_router_cos_loss.item() * train_conf.accumulation_steps # to match the average operation later
-            total_loss_val += weighted_expert_cos_loss.item() * train_conf.accumulation_steps # to match the average operation later
 
             # ====================== GRAD CLIPPING & OPT STEP ======================
             shared_params = [p for n,p in model.named_parameters() if 'expert' not in n]
@@ -192,14 +177,11 @@ def train(model, tokenizer, train_conf, model_conf, or_conf, val_dl, seed, save_
                 'total_tokens_trained': total_tokens_trained,
                 'lr': optimizer.param_groups[0]['lr'],
                 'aux_coef': train_conf.router_aux_loss_coef,
-                'router_cos_coef': or_conf.router_cos_loss_coef,
-                'expert_cos_coef': or_conf.expert_cos_loss_coef,
+                'cos_coef': train_conf.router_cos_loss_coef,
                 'train': {
                     'loss': avg_loss,
                     'base_loss': outputs['base_loss'].detach().cpu().item(), # From last microbatch only
                     'aux_loss':  outputs['aux_loss'].detach().cpu().item(), # From last microbatch only
-                    'router_cos_loss':  router_cos_loss.detach().cpu().item(),
-                    'expert_cos_loss':  expert_cos_loss.detach().cpu().item()
                 },
                 'fwd_time':  total_fwd_time,
                 'bwd_time':  total_bwd_time,
@@ -208,16 +190,6 @@ def train(model, tokenizer, train_conf, model_conf, or_conf, val_dl, seed, save_
 
             # ============== EXPENSIVE METRICS (EVERY 10 STEPS) ==============
             if step % 10 == 0:
-                
-                router_cos_dict_final = {}
-                for layer_idx, router_cos_loss_layer in enumerate(router_cos_loss_per_layer):
-                    router_cos_dict_final[layer_idx] = router_cos_loss_layer.detach().cpu().item()
-                metrics['router_cos_loss'] = router_cos_dict_final
-                
-                expert_cos_dict_final = {}
-                for layer_idx, expert_cos_loss_layer in enumerate(expert_cos_loss_per_layer):
-                    expert_cos_dict_final[layer_idx] = expert_cos_loss_layer.detach().cpu().item()
-                metrics['expert_cos_loss'] = expert_cos_dict_final
                 
                 # Convert usage_accum (list of defaultdicts) into a more standard dict for logging
                 usage_dict_final = {}
@@ -257,3 +229,5 @@ def train(model, tokenizer, train_conf, model_conf, or_conf, val_dl, seed, save_
                 )
                 
             step += 1
+            
+            return 

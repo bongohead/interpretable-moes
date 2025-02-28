@@ -14,8 +14,8 @@ import glob
 import json
 from datetime import datetime
 
-from helpers.moe_utils import prepare_4d_causal_attention_mask_with_cache_position, load_balancing_loss_func
-from config import ModelConf
+from helpers.moe_utils import prepare_4d_causal_attention_mask_with_cache_position, load_balancing_loss_func, gap_loss_func, representation_orthogonal_loss_func
+from config import ModelConf, OrthoMappingConf
 
 
 from transformers.modeling_flash_attention_utils import _flash_attention_forward # Flash attention forward
@@ -176,7 +176,10 @@ class OlmoeMLP(nn.Module):
         down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
         return down_proj
     
-
+    def return_flattened_weights(self):
+        # return the flattened weights of the MLP as 1D tensor
+        return torch.cat([self.gate_proj.weight.view(-1), self.up_proj.weight.view(-1), self.down_proj.weight.view(-1)])
+    
 class OlmoeMoe(nn.Module):
     """
     Entire MLP layer including router
@@ -202,7 +205,7 @@ class OlmoeMoe(nn.Module):
         Forward method routes to one of several possible other forward methods
         """
         if moe_method == 'forward_slow':
-            moe_output, router_logits, topk_expert_ids = self.forward_slow(hidden_state, use_lflb)
+            moe_output, router_logits, topk_expert_ids, expert_outputs = self.forward_slow(hidden_state, use_lflb)
         elif moe_method == 'forward_fast':
             moe_output, router_logits, topk_expert_ids = self.forward_fast(hidden_state, use_lflb)
         elif moe_method == 'forward_async':
@@ -210,13 +213,14 @@ class OlmoeMoe(nn.Module):
         else:
             raise ValueError(f'Method "{moe_method}" not implemented.')
         
-        # Add output from shared experts
+        # Add output from shared experts 
+        # should modifiy this later to add the expert outputs from the shared experts
         shared_total = torch.zeros_like(moe_output)
         for shared_expert in self.shared_experts:
             shared_total += shared_expert(hidden_state)
         
         mlp_output = moe_output + shared_total
-        return mlp_output, router_logits, topk_expert_ids
+        return mlp_output, router_logits, topk_expert_ids, expert_outputs
         
     # -------------------- LOSS-FREE BIAS UPDATE FUNCTION --------------------
     @torch.no_grad()
@@ -271,6 +275,7 @@ class OlmoeMoe(nn.Module):
         
         # 3) ---------------- Iterate through all the experts, apply each expert to the tokens where the expert are relevant, multiple output by the weights for the topk/token for that expert ----------------
         # Initialize output buffer
+        expert_outputs = torch.zeros((B * N, self.n_experts, D), dtype=hidden_state.dtype, device=hidden_state.device)
         mlp_output = torch.zeros((B * N, D), dtype = hidden_state.dtype, device = hidden_state.device) # Initialize MLP output - later iterate through experts and sum onto this object
         # Iterate
         for expert_ix, expert in enumerate(self.experts):
@@ -295,10 +300,15 @@ class OlmoeMoe(nn.Module):
 
             # Move back to original device and acucmulate into mlp output
             expert_output = expert_output.to(mlp_output.device)
+            
+            
             mlp_output.index_add_(0, token_indices, expert_output.to(hidden_state.dtype))
-
+            
+            expert_outputs[token_indices, expert_ix] = expert_output
+            
+        # print(expert_outputs.shape)
         mlp_output = mlp_output.reshape(B, N, D) # Convert back from BN x D -> B x N x D
-        return mlp_output, router_logits, topk_expert_ids
+        return mlp_output, router_logits, topk_expert_ids, expert_outputs
     
 
     def forward_fast(self, hidden_state: torch.Tensor, use_lflb: bool) -> tuple[torch.Tensor, torch.Tensor]:
@@ -489,7 +499,6 @@ class OlmoeMoe(nn.Module):
         mlp_output = mlp_output.view(B, N, D)
         return mlp_output, router_logits, topk_expert_ids
 
-
 """ 
 Now let's define the transformer block.
 - Most likely, there is nothing to change here, unless you need to change the input/outputs from the MoE layer.
@@ -539,23 +548,23 @@ class OlmoeBlock(nn.Module):
             hidden_state = self.post_attention_layernorm(hidden_state)
             
             ### MLP + Sum to Residual Stream###
-            mlp_output, router_logits, topk_experts = self.moe(hidden_state, moe_method = moe_method, use_lflb = use_lflb)
+            mlp_output, router_logits, topk_experts, expert_outputs = self.moe(hidden_state, moe_method = moe_method, use_lflb = use_lflb)
             hidden_state = residual + mlp_output
             
-            return hidden_state, router_logits, topk_experts
+            return hidden_state, router_logits, topk_experts, expert_outputs
     
         if use_checkpointing:
             # Use gradient checkpointing to reduce activation memory
-            hidden_state, router_logits, topk_experts = torch.utils.checkpoint.checkpoint(
+            hidden_state, router_logits, topk_experts, expert_outputs = torch.utils.checkpoint.checkpoint(
                 custom_forward, hidden_state, attention_mask, position_ids, position_embeddings, moe_method, use_lflb, use_reentrant = True
             )
         else:
             # Normal forward pass
-            hidden_state, router_logits, topk_experts = custom_forward(
+            hidden_state, router_logits, topk_experts, expert_outputs = custom_forward(
                 hidden_state, attention_mask, position_ids, position_embeddings, moe_method, use_lflb
             )
             
-        return hidden_state, router_logits, topk_experts
+        return hidden_state, router_logits, topk_experts, expert_outputs
 
 """ 
 Now define the top-level model.
@@ -572,7 +581,7 @@ class OlmoeModel(nn.Module):
     """
     The top level model object. Also handles weight initialization and loss calculations.
     """
-    def __init__(self, conf: ModelConf, primary_device: str, expert_device_map: None|list[str] = None):
+    def __init__(self, conf: ModelConf, or_conf: OrthoMappingConf, primary_device: str, expert_device_map: None|list[str] = None):
         """
         Params:
             @conf: A configuration object of class ModelConf.
@@ -582,7 +591,7 @@ class OlmoeModel(nn.Module):
         """
         super().__init__()
         self.conf = conf
-        
+        self.or_conf = or_conf
         ### Layers ###
         self.embed_tokens = nn.Embedding(self.conf.vocab_size, self.conf.D, self.conf.padding_idx)
         self.rotary_emb = OlmoeRotaryEmbedding(conf = self.conf)
@@ -592,10 +601,11 @@ class OlmoeModel(nn.Module):
         
         ### Initialize weights ###
         self.apply(self._init_weights)
-        if self.conf.gate_orthogonal:
+        if self.or_conf.is_gate_orthogonal_init:
             for layer in self.layers:
-                self._orthogonal_weights(layer.moe.gate.weight) # orthogonal initialization of gate weights
-                layer.moe.gate.weight.requires_grad = not self.conf.is_freeze_weights
+                self._orthogonal_weights(layer.moe.gate.weight) 
+        for layer in self.layers:
+            layer.moe.gate.weight.requires_grad = not self.or_conf.is_freeze_gate_weights
             
         ### Model ###
         self.to(primary_device)
@@ -681,9 +691,9 @@ class OlmoeModel(nn.Module):
         ### Transformer layers ###
         all_router_logits = () # Save router logits from each layer into this; will be needed for load balancing loss
         all_topk_experts = () # Return topk experts
-        
-        for _, layer in enumerate(self.layers):
-            hidden_state, router_logits, topk_experts = layer(
+        all_expert_outputs = () # Save hidden states from each layer into this; will be needed for representation orthogonal loss
+        for layer_idx, layer in enumerate(self.layers):
+            hidden_state, router_logits, topk_experts, expert_outputs = layer(
                 hidden_state,
                 attention_mask = causal_mask,
                 position_ids = position_ids,
@@ -694,9 +704,11 @@ class OlmoeModel(nn.Module):
             )
             all_router_logits += (router_logits, )
             all_topk_experts += (topk_experts,)  # Store the topk_experts for each layer
-
+            all_expert_outputs += (expert_outputs,) # Store the hidden states for each layer
         hidden_state = self.norm(hidden_state)
+        
         output_logits = self.lm_head(hidden_state)
+
 
         ##### Calculate Loss #####
         # The labels object should be a tensor of token IDs or -100 (for attention mask, since don't want to calculate loss for those)
@@ -705,11 +717,17 @@ class OlmoeModel(nn.Module):
         base_loss = ForCausalLMLoss(output_logits, label_ids, self.conf.vocab_size)
         # Get load balancing loss
         aux_loss = load_balancing_loss_func(gate_logits = all_router_logits, num_experts = self.conf.n_experts, top_k = self.conf.top_k, attention_mask = attention_mask)
-
+        # Get gap loss
+        gap_loss = gap_loss_func(gate_logits = all_router_logits, top_k = self.conf.top_k, attention_mask = attention_mask, upper_bound = 0.5/self.conf.top_k)
+        # Get representation orthogonal loss
+        ortho_loss_mean, ortho_loss_per_layer = representation_orthogonal_loss_func(hidden_states = all_expert_outputs, conf = self.conf)
         return {
             'all_router_logits': all_router_logits,
             'all_topk_experts': all_topk_experts,
             'logits': output_logits,
             'aux_loss': aux_loss,
-            'base_loss': base_loss
+            'base_loss': base_loss,
+            'gap_loss': gap_loss,
+            'ortho_loss': ortho_loss_mean,
+            'ortho_loss_per_layer': ortho_loss_per_layer
         }
