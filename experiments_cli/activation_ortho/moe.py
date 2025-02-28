@@ -195,6 +195,10 @@ class OlmoeMoe(nn.Module):
         self.gate = nn.Linear(conf.D, self.n_experts, bias = False) # Router
         self.experts = nn.ModuleList([OlmoeMLP(conf) for _ in range(self.n_experts)]) # Create experts using OlmoeMLP
         self.shared_experts = nn.ModuleList([OlmoeMLP(conf) for _ in range(self.n_shared_experts)])
+        # if distinct norm is True, apply distinct RMSNorm to each expert and shared expert
+        if conf.is_distinct_norm:
+            self.experts_norm = nn.ModuleList([OlmoeRMSNorm(conf.D, eps = conf.rms_norm_eps) for _ in range(self.n_experts)])
+            self.shared_experts_norm = nn.ModuleList([OlmoeRMSNorm(conf.D, eps = conf.rms_norm_eps) for _ in range(self.n_shared_experts)])
         
         # Loss-free load balancing bias ----------------
         # We store a bias value b_i for each expert i.  These are NOT updated by backprop.
@@ -216,8 +220,12 @@ class OlmoeMoe(nn.Module):
         # Add output from shared experts 
         # should modifiy this later to add the expert outputs from the shared experts
         shared_total = torch.zeros_like(moe_output)
-        for shared_expert in self.shared_experts:
-            shared_total += shared_expert(hidden_state)
+        if self.conf.is_distinct_norm:
+            for expert_ix, shared_expert in enumerate(self.shared_experts):
+                shared_total += self.shared_experts_norm[expert_ix](shared_expert(hidden_state))
+        else:
+            for shared_expert in self.shared_experts:
+                shared_total += shared_expert(hidden_state)
         
         mlp_output = moe_output + shared_total
         return mlp_output, router_logits, topk_expert_ids, expert_outputs
@@ -294,17 +302,20 @@ class OlmoeMoe(nn.Module):
 
             # Forward through expert
             expert_output = expert(tokens_for_expert)
+            
+            if self.conf.is_distinct_norm:
+                expert_output = self.experts_norm[expert_ix](expert_output)
+
+            expert_outputs[token_indices, expert_ix] = expert_output.to(hidden_state.device)
           
             # For each num_assigned_tokens, multiples it by the corresponding weight in topk_slot fort that token_index
-            expert_output = expert_output * topk_weights[token_indices, topk_slot].unsqueeze(1).to(expert_device)
+            expert_output = expert_output.to(expert_device) * topk_weights[token_indices, topk_slot].unsqueeze(1).to(expert_device)
 
             # Move back to original device and acucmulate into mlp output
             expert_output = expert_output.to(mlp_output.device)
             
             
             mlp_output.index_add_(0, token_indices, expert_output.to(hidden_state.dtype))
-            
-            expert_outputs[token_indices, expert_ix] = expert_output
             
         # print(expert_outputs.shape)
         mlp_output = mlp_output.reshape(B, N, D) # Convert back from BN x D -> B x N x D

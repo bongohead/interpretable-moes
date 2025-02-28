@@ -12,6 +12,7 @@ class OrthoMappingConf:
     router_cos_loss_coef: float = 0 # (relative weight of cosine similarity loss for the router)
     expert_cos_loss_coef: float = 0 # (relative wegith of cosine similarty loss for the experts)
     
+    
 
 @dataclass
 class ModelConf:
@@ -33,6 +34,8 @@ class ModelConf:
     max_position_embeddings: int = 4096 # Base OlMoE: 4096 (this is something needed for ROPE)
     attn_method: str = 'fa2' # In OlMoE this is chosen automatically, here we explicitly pass it - choose 'normal', 'sdpa', or 'fa2'
     main_device: str = 'cuda:0' # Main device for model
+    is_distinct_norm: bool = False # whether or not applied distinct RMSNorm to each expert
+    
 
 
 """ 

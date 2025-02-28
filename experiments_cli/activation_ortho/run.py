@@ -22,9 +22,9 @@ from moe import OlmoeModel
 from train import train
 
 
-RUN_NAME = 'baseline_small'
-RUN_NOTES = 'default baseline, without any loss including load-balancing loss'
-save_dir = 'baseline_small'
+RUN_NAME = 'small_distinct_norm'
+RUN_NOTES = 'default baseline, without any loss including load-balancing loss, using distinct RMSNorm for each expert and shared expert'
+save_dir = 'small_distinct_norm'
 
 model_conf = ModelConf(
     D = 768, 
@@ -36,7 +36,8 @@ model_conf = ModelConf(
     norm_topk_prob = False,
     n_layers = 12,
     max_position_embeddings = 1024,
-    main_device = 'cuda:0'
+    main_device = 'cuda:0',
+    is_distinct_norm = True
 )
 
 train_conf = TrainConf(
@@ -45,8 +46,8 @@ train_conf = TrainConf(
     seq_len = 1024, 
     use_lflb = False,
     gap_loss_coef = 0,
-    router_aux_loss_coef = 0,
-    ortho_loss_coef = 0.1
+    router_aux_loss_coef = 0.01,
+    ortho_loss_coef = 0
 )
 
 or_conf = OrthoMappingConf(
