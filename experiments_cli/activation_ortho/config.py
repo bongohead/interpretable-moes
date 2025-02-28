@@ -9,8 +9,8 @@ class OrthoMappingConf:
 
     is_gate_orthogonal_init: bool = False # whether to orthogonalize the initial gate weights
     is_freeze_gate_weights: bool = False # whether to freeze the gate weights
-    router_cos_loss_coef: float = 0.01 # (relative weight of cosine similarity loss for the router)
-    expert_cos_loss_coef: float = 0.01 # (relative wegith of cosine similarty loss for the experts)
+    router_cos_loss_coef: float = 0 # (relative weight of cosine similarity loss for the router)
+    expert_cos_loss_coef: float = 0 # (relative wegith of cosine similarty loss for the experts)
     
 
 @dataclass
@@ -41,9 +41,9 @@ Set training constants to be used for training later.
 """
 @dataclass
 class TrainConf:
-    router_aux_loss_coef: float = 0.01  # Base OlMoE: 0.01 (relative weight of balancing loss)
-    gap_loss_coef: float = 0.01 # (relative weight of gap loss)
-    ortho_loss_coef: float = 0.01 # (relative weight of orthogonal loss)
+    router_aux_loss_coef: float = 0  # Base OlMoE: 0.01 (relative weight of balancing loss)
+    gap_loss_coef: float = 0 # (relative weight of gap loss)
+    ortho_loss_coef: float = 0 # (relative weight of orthogonal loss)
     use_lflb: bool = False # Use loss-free load balancing
     bias_update_rate: float = .002 # Bias update rate for lflb
     lr: float = 0.0005 # The starting LR (after warmup)

@@ -22,9 +22,9 @@ from moe import OlmoeModel
 from train import train
 
 
-RUN_NAME = 'baseline_small, different seed'
-RUN_NOTES = 'small, different seed'
-save_dir = 'baseline_small_different_seed'
+RUN_NAME = 'baseline_small'
+RUN_NOTES = 'default baseline, without any loss including load-balancing loss'
+save_dir = 'baseline_small'
 
 model_conf = ModelConf(
     D = 768, 
