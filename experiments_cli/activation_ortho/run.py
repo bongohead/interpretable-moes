@@ -22,32 +22,41 @@ from moe import OlmoeModel
 from train import train
 
 
-RUN_NAME = 'small_distinct_norm'
-RUN_NOTES = 'default baseline, without any loss including load-balancing loss, using distinct RMSNorm for each expert and shared expert'
-save_dir = 'small_distinct_norm'
+RUN_NAME = 'baseline_medium_loss_free'
+RUN_NOTES = 'baseline model with medium size'
+save_dir = 'baseline_medium_loss_free'
 
 model_conf = ModelConf(
-    D = 768, 
-    H = 12,
-    I = 3072,
+    D = 1024, 
+    H = 16,
+    I = 4096,
     n_experts = 16,
     n_shared_experts = 0,
     top_k = 2,
     norm_topk_prob = False,
-    n_layers = 12,
+    n_layers = 24,
     max_position_embeddings = 1024,
     main_device = 'cuda:0',
-    is_distinct_norm = True
+    is_distinct_norm = False,
+    is_freeze_rms_weight = False,
+    is_cat_output_experts = False,
+    is_max_output_experts = False,
+    inner_mlp_dim = None
 )
 
+assert model_conf.D % model_conf.top_k == 0, "D must be divisible by top_k"
+model_conf.inner_mlp_dim = int(model_conf.D / model_conf.top_k)
+
+
 train_conf = TrainConf(
-    micro_batch_size = 64,
-    accumulation_steps = 8,
+    micro_batch_size = 128,
+    accumulation_steps = 4,
     seq_len = 1024, 
-    use_lflb = False,
+    use_lflb = True,
     gap_loss_coef = 0,
     router_aux_loss_coef = 0.01,
-    ortho_loss_coef = 0
+    ortho_loss_coef = 0,
+    warmup_steps = 500
 )
 
 or_conf = OrthoMappingConf(
@@ -59,7 +68,6 @@ or_conf = OrthoMappingConf(
 )
 
 seed = 3456
-
 
 """ 
 Let's load the model

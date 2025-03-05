@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 import math
 
 
@@ -213,3 +214,42 @@ def zero_diagonal(tensor):
     indices = torch.arange(m, device=tensor.device)
     tensor[:, indices, indices] = 0
     return  tensor
+
+
+def convolve_two_2d(vector_x: torch.Tensor, vector_y: torch.Tensor) -> torch.Tensor:
+    """
+    Convolve two 2D tensors row-wise using PyTorch's 1D convolution.
+    For each row in vector_x (shape (B, L)), it is convolved with the corresponding row in vector_y.
+    The kernel (vector_y) is flipped along its last dimension for true convolution.
+    Padding is applied (manually, and asymmetrically if needed) so that the output has the same length L as the input rows,
+    even when L is even.
+    
+    Args:
+        vector_x (torch.Tensor): 2D tensor of shape (B, L) representing the input signals.
+        vector_y (torch.Tensor): 2D tensor of shape (B, L) representing the convolution kernels.
+        
+    Returns:
+        torch.Tensor: 2D tensor of shape (B, L) resulting from convolving each row of vector_x
+                      with the corresponding (flipped) row of vector_y.
+    """
+    B, L = vector_x.shape
+    
+    # Treat each row as a channel: shape becomes (1, B, L)
+    x = vector_x.unsqueeze(0)
+    
+    # Flip each row of vector_y and reshape for grouped convolution: (B, 1, L)
+    kernel = vector_y.flip(dims=[1]).unsqueeze(1)
+    
+    # Compute asymmetric padding:
+    # Total required padding = L - 1, so that output length = (L + (L-1) - L + 1) = L.
+    pad_left = (L - 1) // 2
+    pad_right = (L - 1) - pad_left
+    
+    # Manually pad the last dimension (PyTorch expects padding as (left, right))
+    x_padded = F.pad(x, (pad_left, pad_right))
+    
+    # Perform the grouped convolution with no additional padding.
+    conv_result = F.conv1d(x_padded, weight=kernel, padding=0, groups=B)
+    
+    # Remove the batch dimension; result shape will be (B, L)
+    return conv_result.squeeze(0)

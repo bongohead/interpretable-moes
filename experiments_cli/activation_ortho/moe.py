@@ -16,9 +16,32 @@ from datetime import datetime
 
 from helpers.moe_utils import prepare_4d_causal_attention_mask_with_cache_position, load_balancing_loss_func, gap_loss_func, representation_orthogonal_loss_func
 from config import ModelConf, OrthoMappingConf
+from helpers.moe_utils import convolve_two_2d
 
 
 from transformers.modeling_flash_attention_utils import _flash_attention_forward # Flash attention forward
+
+class OlmoeRMSNormFreeze(nn.Module):
+    """
+    Apply RMS Norm
+    - Copied from https://github.com/huggingface/transformers/blob/main/src/transformers/models/olmoe/modeling_olmoe.py#L137-L154
+    - This is the only norm used in OlMoE!
+      - It's used 4 times per layer (attention key norm, attention query norm, layer residual pre-attention norm, post-attention norm)
+      - Also one additional time before the final LM head 
+    """
+    def __init__(self, D, eps = 1e-5):
+        super().__init__()
+        self.register_buffer('weight', torch.ones(D))
+        self.variance_epsilon = eps
+
+    def forward(self, hidden_states):
+        input_dtype = hidden_states.dtype
+        hidden_states = hidden_states.to(torch.float32)
+        variance = hidden_states.pow(2).mean(-1, keepdim = True)
+        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        return self.weight * hidden_states.to(input_dtype)
+
+
 
 class OlmoeRMSNorm(nn.Module):
     """
@@ -191,14 +214,24 @@ class OlmoeMoe(nn.Module):
         self.top_k = conf.top_k
         self.norm_topk_prob = conf.norm_topk_prob
         self.n_shared_experts = conf.n_shared_experts
+        self.is_distinct_norm = conf.is_distinct_norm
+        self.is_cat_output_experts = conf.is_cat_output_experts
+        self.is_max_output_experts = conf.is_max_output_experts
+        self.is_freeze_rms_weight = conf.is_freeze_rms_weight
+        self.inner_mlp_dim = conf.inner_mlp_dim
 
+        
         self.gate = nn.Linear(conf.D, self.n_experts, bias = False) # Router
         self.experts = nn.ModuleList([OlmoeMLP(conf) for _ in range(self.n_experts)]) # Create experts using OlmoeMLP
         self.shared_experts = nn.ModuleList([OlmoeMLP(conf) for _ in range(self.n_shared_experts)])
         # if distinct norm is True, apply distinct RMSNorm to each expert and shared expert
-        if conf.is_distinct_norm:
-            self.experts_norm = nn.ModuleList([OlmoeRMSNorm(conf.D, eps = conf.rms_norm_eps) for _ in range(self.n_experts)])
-            self.shared_experts_norm = nn.ModuleList([OlmoeRMSNorm(conf.D, eps = conf.rms_norm_eps) for _ in range(self.n_shared_experts)])
+        if self.is_distinct_norm:
+            if self.is_freeze_rms_weight:
+                self.experts_norm = nn.ModuleList([OlmoeRMSNormFreeze(conf.D, eps = conf.rms_norm_eps) for _ in range(self.n_experts)])
+                self.shared_experts_norm = nn.ModuleList([OlmoeRMSNormFreeze(conf.D, eps = conf.rms_norm_eps) for _ in range(self.n_shared_experts)])
+            else:
+                self.experts_norm = nn.ModuleList([OlmoeRMSNorm(conf.D, eps = conf.rms_norm_eps) for _ in range(self.n_experts)])
+                self.shared_experts_norm = nn.ModuleList([OlmoeRMSNorm(conf.D, eps = conf.rms_norm_eps) for _ in range(self.n_shared_experts)])
         
         # Loss-free load balancing bias ----------------
         # We store a bias value b_i for each expert i.  These are NOT updated by backprop.
@@ -220,7 +253,7 @@ class OlmoeMoe(nn.Module):
         # Add output from shared experts 
         # should modifiy this later to add the expert outputs from the shared experts
         shared_total = torch.zeros_like(moe_output)
-        if self.conf.is_distinct_norm:
+        if self.is_distinct_norm:
             for expert_ix, shared_expert in enumerate(self.shared_experts):
                 shared_total += self.shared_experts_norm[expert_ix](shared_expert(hidden_state))
         else:
@@ -283,8 +316,12 @@ class OlmoeMoe(nn.Module):
         
         # 3) ---------------- Iterate through all the experts, apply each expert to the tokens where the expert are relevant, multiple output by the weights for the topk/token for that expert ----------------
         # Initialize output buffer
-        expert_outputs = torch.zeros((B * N, self.n_experts, D), dtype=hidden_state.dtype, device=hidden_state.device)
-        mlp_output = torch.zeros((B * N, D), dtype = hidden_state.dtype, device = hidden_state.device) # Initialize MLP output - later iterate through experts and sum onto this object
+        # expert_outputs = torch.zeros((B * N, self.n_experts, D), dtype=hidden_state.dtype, device=hidden_state.device)
+        if not self.is_cat_output_experts:
+            mlp_output = torch.zeros((B * N, D), dtype = hidden_state.dtype, device = hidden_state.device) # Initialize MLP output - later iterate through experts and sum onto this object
+        else: # not efficient implementation
+            mlp_output = torch.full((B * N,  D, self.n_experts), -float('inf'), dtype = hidden_state.dtype, device = hidden_state.device)
+        
         # Iterate
         for expert_ix, expert in enumerate(self.experts):
             
@@ -303,10 +340,10 @@ class OlmoeMoe(nn.Module):
             # Forward through expert
             expert_output = expert(tokens_for_expert)
             
-            if self.conf.is_distinct_norm:
+            if self.is_distinct_norm:
                 expert_output = self.experts_norm[expert_ix](expert_output)
 
-            expert_outputs[token_indices, expert_ix] = expert_output.to(hidden_state.device)
+            # expert_outputs[token_indices, expert_ix] = expert_output.to(hidden_state.device)
           
             # For each num_assigned_tokens, multiples it by the corresponding weight in topk_slot fort that token_index
             expert_output = expert_output.to(expert_device) * topk_weights[token_indices, topk_slot].unsqueeze(1).to(expert_device)
@@ -314,12 +351,29 @@ class OlmoeMoe(nn.Module):
             # Move back to original device and acucmulate into mlp output
             expert_output = expert_output.to(mlp_output.device)
             
-            
-            mlp_output.index_add_(0, token_indices, expert_output.to(hidden_state.dtype))
-            
+            if not self.is_max_output_experts and not self.is_cat_output_experts:
+                mlp_output.index_add_(0, token_indices, expert_output.to(hidden_state.dtype))
+            elif self.is_max_output_experts:
+                expanded_indices = token_indices.unsqueeze(-1).expand(-1, D)
+                mlp_output = torch.scatter_reduce(
+                    mlp_output, 0, expanded_indices, expert_output.to(hidden_state.dtype),
+                    reduce="amax", include_self=False
+                )
+            elif self.is_cat_output_experts:
+                mlp_output[token_indices, :, expert_ix] = expert_output.to(hidden_state.dtype)
+
+        if self.is_cat_output_experts:
+            # along the expert dimension, return the topk max values
+            # print(mlp_output.shape)
+            mlp_output = torch.topk(mlp_output, dim = -1, k = self.top_k)[0]
+            # check how many -inf values are in the tensor
+            # print(mlp_output.shape)
+            # print(torch.sum(mlp_output == -float('inf')))
+            mlp_output = mlp_output.reshape(B* N, D)
+            # print(mlp_output.shape)
         # print(expert_outputs.shape)
         mlp_output = mlp_output.reshape(B, N, D) # Convert back from BN x D -> B x N x D
-        return mlp_output, router_logits, topk_expert_ids, expert_outputs
+        return mlp_output, router_logits, topk_expert_ids, torch.zeros((1, 1, D))
     
 
     def forward_fast(self, hidden_state: torch.Tensor, use_lflb: bool) -> tuple[torch.Tensor, torch.Tensor]:

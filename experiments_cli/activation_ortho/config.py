@@ -34,7 +34,11 @@ class ModelConf:
     max_position_embeddings: int = 4096 # Base OlMoE: 4096 (this is something needed for ROPE)
     attn_method: str = 'fa2' # In OlMoE this is chosen automatically, here we explicitly pass it - choose 'normal', 'sdpa', or 'fa2'
     main_device: str = 'cuda:0' # Main device for model
-    is_distinct_norm: bool = False # whether or not applied distinct RMSNorm to each expert
+    is_distinct_norm: bool = False # whether or not applied distinct RMSNorm to each expert,
+    is_freeze_rms_weight: bool = False # whether or not freeze the RMSNorm weights
+    is_cat_output_experts: bool = False # whether or not concatenate the output of the experts
+    is_max_output_experts: bool = False # whether or not use the max output of the experts
+    inner_mlp_dim: int = None # the dimension of the inner MLP
     
 
 
