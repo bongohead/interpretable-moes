@@ -31,6 +31,7 @@ class TextDataset(Dataset):
 def load_shard_as_dataloader(shard_path, tokenizer, batch_size, seq_len, eos_seperator_id, shuffle = True):
     """
     Loads a shard of text samples from `shard_path` and does an on-the-fly "concatenate-then-chunk" to produce a DataLoader of fixed-length sequences.
+     Requires files created by `download-data.ipynb`.
 
     Params:
         @shard_path: Path to a JSON file containing a list of text samples.
@@ -75,16 +76,16 @@ def load_shard_as_dataloader(shard_path, tokenizer, batch_size, seq_len, eos_sep
     return dl
 
     
-def load_pt_shard_as_dataloader(shard_pt_path: str, tokenizer,  batch_size: int, seq_len: int, shuffle: bool = True):
+def load_pt_shard_as_dataloader(shard_pt_path: str, tokenizer, batch_size: int, seq_len: int, shuffle: bool = True):
     """
     Loads a shard of pre-tokenized text samples from `shard_pt_path` and does an on-the-fly "concatenate-then-chunk" to produce a DataLoader of fixed-length sequences.
+     Requires files created by `process-data.ipynb`.
 
     Params:
         @shard_pt_path: Path to a PT file containing a 1D tokens_1d array. 
         @tokenizer: A HF tokenizer or similar with `encode` method.
         @batch_size: Batch size for the DataLoader.
         @seq_len: Sequence length for the output tokens.
-        @insert_eos: If True, insert `tokenizer.eos_token_id` between samples.
         @shuffle: Whether to shuffle the dataset.
 
     Returns:
