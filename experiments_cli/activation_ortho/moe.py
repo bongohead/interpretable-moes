@@ -751,8 +751,9 @@ class OlmoeModel(nn.Module):
             causal_mask = _prepare_4d_causal_attention_mask_with_cache_position(attention_mask, N, N, hidden_state.dtype, hidden_state.device, cache_position, B)
         # The flash attention mask is simpler - takes only the original attention mask or None
         elif self.conf.attn_method == 'fa2':
-            causal_mask  = attention_mask if (attention_mask is not None and 0 in attention_mask) else None
-        
+            # causal_mask  = attention_mask if (attention_mask is not None and 0 in attention_mask) else None
+            # modify this to see if still exist warnings
+            causal_mask = attention_mask if (attention_mask is not None and torch.any(attention_mask == 0)) else None
         ### Transformer layers ###
         all_router_logits = () # Save router logits from each layer into this; will be needed for load balancing loss
         all_topk_experts = () # Return topk experts
