@@ -7,6 +7,7 @@ import yaml
 import torch
 from torch.utils.data import Dataset, DataLoader
 import math
+import numpy as np
 
 class ContextLabeledDataset(Dataset):
     """
@@ -84,7 +85,7 @@ def get_context_labeled_data(search_path: str, tokenizer, max_length: int = 512,
         @batch_size: The batch size to return for each dataloader iteration
     
     Example:
-        context_aware_test_dataset = get_context_aware_test_data("./../../data/contextual-tokens/samples_*.yaml", tokenizer, 512, 64)
+        context_aware_test_dataset = get_context_labeled_data("./../../data/contextual-tokens/samples_*.yaml", tokenizer, 512, 64)
 
     Returns:
         A list of dictionaries, where each dictionary is structured as:
@@ -194,7 +195,7 @@ def get_ics(model, test_token_data_list, main_device, use_topk1 = False):
     Params:
         @model: The model, must return `all_topk_experts` which is a tuple of length equal to # layers, where each element of
           the tuple is a BN x topk tensor of selected expert IDs.
-        @test_token_data_list: A list of dictionaries of the exact format returned by `get_context_aware_test_data`.
+        @test_token_data_list: A list of dictionaries of the exact format returned by `get_context_labeled_data`.
         @main_device: The device to run calculations on.
         @use_topk1: Whether to only test the topk = 1 expert.
 
@@ -248,7 +249,6 @@ def get_ics(model, test_token_data_list, main_device, use_topk1 = False):
                 meaning_id_array.append(meaning_to_idx[m_str])
             meaning_id_array = torch.tensor(meaning_id_array, device = main_device)  # (B,)
             meaning_id_array = meaning_id_array.unsqueeze(1).repeat(1, N).view(-1)  # Expand to shape (B, N), so each token in that example has the same meaning
-
 
             for l in range(n_layers):
                 layer_exps = all_topk_experts[l]  # shape (BN, top_k)
@@ -314,7 +314,7 @@ def get_tis(model, test_token_data_list, main_device, pad_token_id, use_topk1 = 
     Params:
         @model: The model, must return `all_topk_experts` which is a tuple of length equal to # layers, where each element of
           the tuple is a BN x topk tensor of selected expert IDs.
-        @test_token_data_list: A list of dictionaries of the exact format returned by `get_context_aware_test_data`.
+        @test_token_data_list: A list of dictionaries of the exact format returned by `get_context_labeled_data`.
         @pad_token_id: The ID used for padding, which we should exclude from the "global usage" distribution.
 
     Returns:
@@ -608,3 +608,111 @@ def get_cos_sim(model, model_conf, main_device):
         'mean_distance': mean_distance, 
         'distance_by_layer': [x.detach().cpu().item() for x in distances]
     }
+
+
+@torch.no_grad()
+def get_coverage(model, test_token_data_list, main_device, use_topk1 = False):
+    """
+    Computes two metrics for each (token, layer):
+      (A) top4_coverage: fraction of that token's expert assignments that go to the 4 most popular experts for that token in that layer
+      (B) top1_coverage: fraction that goes to the single most popular expert
+
+    Params:
+        @model: The model object. Must return `all_topk_experts` in `outputs["all_topk_experts"]`, a tuple of length n_layers, each shaped (B*N, top_k).
+        @test_token_data_list: The same structure as used for TIS or CA, i.e. a list of dicts:
+            [{
+               "test_token": str,
+               "test_token_id": int,
+               "dl": torch.utils.data.DataLoader
+             }, ...]
+        @main_device: The device for the forward pass.
+        @pad_token_id: The ID used for padding, which we skip.
+
+    Returns:
+        A dict with format:
+            {
+                "top4_coverage": {token_str1: {0: val, 1: val, ..., }, token_str2: {...}, ...},
+                "top1_coverage": {token_str1: {0: val, 1: val, ..., }, token_str2: {...}, ...}
+            }
+    """
+    n_layers = model.conf.n_layers
+    n_experts = model.conf.n_experts
+
+    coverage_result = {"top4_coverage": {}, "top1_coverage": {}}
+
+    for token_item in test_token_data_list:
+        token_str = token_item["test_token"]
+        token_id = token_item["test_token_id"]
+        dl = token_item["dl"]
+
+        # We'll track usage counts for this token at each layer
+        # token_counts_per_layer[l] is a 1D tensor of shape (n_experts,)
+        token_counts_per_layer = [
+            torch.zeros(n_experts, dtype=torch.long) for _ in range(n_layers)
+        ]
+
+    for token_item in test_token_data_list:
+        token_str = token_item["test_token"]
+        token_id = token_item["test_token_id"]
+        dl = token_item["dl"]
+
+        # For each layer, track how many times each expert was used by this token
+        token_counts_per_layer = [
+            torch.zeros(n_experts, dtype=torch.long) for _ in range(n_layers)
+        ]
+
+        # --------------- Accumulate usage counts for this token ---------------
+        for batch in dl:
+            input_ids = batch["input_ids"].to(main_device)
+            attention_mask = batch["attention_mask"].to(main_device)
+
+            outputs = model( input_ids, attention_mask, moe_method = 'forward_slow', use_lflb = True, use_checkpointing = False)
+            all_topk_experts = outputs["all_topk_experts"]  # tuple of (B*N, top_k) for each layer
+
+            if use_topk1:
+                # If we only want top-1 usage
+                all_topk_experts = tuple(x[..., :1] for x in all_topk_experts)
+
+            # Flatten input_ids and find positions of this token
+            flat_ids = input_ids.view(-1)
+            token_mask = (flat_ids == token_id).nonzero(as_tuple=True)[0]
+            if token_mask.numel() == 0:
+                continue
+
+            # For each layer, collect usage for these positions
+            for l in range(n_layers):
+                layer_exps = all_topk_experts[l]
+                token_rows = layer_exps[token_mask, :]  # shape [#token_occurrences, top_k]
+                token_rows = token_rows.view(-1)        # flatten
+                counts_layer = torch.bincount(token_rows, minlength=n_experts)
+                token_counts_per_layer[l] += counts_layer.cpu()
+
+        # --------------- Compute coverage for each layer ---------------
+        # We'll store them in an internal dict, then place them in coverage_result.
+        layer_top4 = {}
+        layer_top1 = {}
+
+        for l in range(n_layers):
+            counts = token_counts_per_layer[l].numpy()
+            total_usage = counts.sum()
+            if total_usage == 0:
+                # Means no usage for this token at layer l
+                layer_top4[l] = 0.0
+                layer_top1[l] = 0.0
+                continue
+
+            sorted_experts = np.argsort(counts)[::-1]  # largest to smallest
+            sorted_counts = counts[sorted_experts]
+
+            # Sum of top-4
+            top4_sum = sorted_counts[:4].sum()  # up to 4 if you have >= 4 experts
+            top1_sum = sorted_counts[0]
+
+            layer_top4[l] = float(top4_sum / total_usage)
+            layer_top1[l] = float(top1_sum / total_usage)
+
+        # Add them to the big dictionary
+        coverage_result["top4_coverage"][token_str] = layer_top4
+        coverage_result["top1_coverage"][token_str] = layer_top1
+
+    return coverage_result
