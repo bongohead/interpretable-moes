@@ -110,6 +110,7 @@ additional_log_notes = {
     'run_name': RUN_NAME,
     'notes': RUN_NOTES,
     'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    'total_trainable_model_params': sum(p.numel() for p in model.parameters() if p.requires_grad),
     'total_model_params': sum(p.numel() for p in model.parameters()),
     'available_cuda_gpus': [torch.cuda.get_device_properties(i).name for i in range(torch.cuda.device_count())],
     'model_conf': asdict(model_conf),
