@@ -41,8 +41,6 @@ class OlmoeRMSNormFreeze(nn.Module):
         hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
         return self.weight * hidden_states.to(input_dtype)
 
-
-
 class OlmoeRMSNorm(nn.Module):
     """
     Apply RMS Norm
@@ -218,8 +216,11 @@ class OlmoeMoe(nn.Module):
         self.is_cat_output_experts = conf.is_cat_output_experts
         self.is_max_output_experts = conf.is_max_output_experts
         self.is_freeze_rms_weight = conf.is_freeze_rms_weight
-        self.inner_mlp_dim = conf.inner_mlp_dim
 
+        if self.is_cat_output_experts or self.is_max_output_experts:
+            print(f"is_cat_output_experts: {self.is_cat_output_experts}, is_max_output_experts: {self.is_max_output_experts}")
+            raise ValueError("This is not supported yet") 
+        
         
         self.gate = nn.Linear(conf.D, self.n_experts, bias = False) # Router
         self.experts = nn.ModuleList([OlmoeMLP(conf) for _ in range(self.n_experts)]) # Create experts using OlmoeMLP
@@ -243,6 +244,8 @@ class OlmoeMoe(nn.Module):
         """
         if moe_method == 'forward_slow':
             moe_output, router_logits, topk_expert_ids, expert_outputs = self.forward_slow(hidden_state, use_lflb)
+        elif moe_method == 'forward_slow_with_expert_activations':
+            moe_output, router_logits, topk_expert_ids, expert_outputs = self.forward_slow_with_expert_activations(hidden_state, use_lflb)
         elif moe_method == 'forward_fast':
             moe_output, router_logits, topk_expert_ids = self.forward_fast(hidden_state, use_lflb)
         elif moe_method == 'forward_async':
@@ -285,6 +288,93 @@ class OlmoeMoe(nn.Module):
         # Optionally: clamp the biases to avoid extreme values
         self.expert_biases.clamp_(-5.0, 5.0)
 
+
+    def forward_slow_with_expert_activations(self, hidden_state: torch.Tensor, use_lflb: bool) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        This is the more intuitive forward pass which loops through each expert slowly.
+        Records the raw activations for each token's top-k experts using vectorized operations.
+        """
+        B, N, D = hidden_state.shape
+
+        # Flatten out B x N x D to BN x D
+        hidden_state = hidden_state.view(B * N, D)
+        
+        # 1) ---------------- Compute router logits -> choose topk experts and weights ----------------
+        router_logits = self.gate(hidden_state) # (BN, n_experts)
+        routing_weights = F.softmax(router_logits, dim = 1, dtype = torch.float)  # (BN, n_experts)
+
+        if use_lflb:
+            router_logits_biased = router_logits + self.expert_biases.unsqueeze(0)
+            _, topk_expert_ids = torch.topk(router_logits_biased, self.top_k, dim = -1) # (BN, top_k)
+            topk_weights = torch.gather(routing_weights, 1, topk_expert_ids) # (BN, top_k)
+        else:
+            topk_weights, topk_expert_ids = torch.topk(routing_weights, self.top_k, dim = -1) # both (BN, top_k)
+
+        topk_weights = topk_weights.to(hidden_state.dtype)
+        if self.norm_topk_prob:
+            topk_weights /= (topk_weights.sum(dim = -1, keepdim = True) + 1e-9)
+
+        # 2) ---------------- One hot encode expert assignments ----------------
+        expert_assignment_mask = F.one_hot(topk_expert_ids, num_classes = self.n_experts).permute(2, 1, 0) # (N_EXPERTS, TOP_K, BN)
+        
+        # 3) ---------------- Initialize output buffers ----------------
+        if not self.is_cat_output_experts:
+            mlp_output = torch.zeros((B * N, D), dtype = hidden_state.dtype, device = hidden_state.device)
+        else:
+            mlp_output = torch.full((B * N, D, self.n_experts), -float('inf'), dtype = hidden_state.dtype, device = hidden_state.device)
+        
+        topk_expert_activations = torch.zeros((B * N, self.top_k, D), 
+                                            dtype=hidden_state.dtype, 
+                                            device=hidden_state.device)
+        
+        # 4) ---------------- Iterate through experts (not tokens) ----------------
+        for expert_ix, expert in enumerate(self.experts):
+            # Get tokens assigned to this expert
+            topk_slot, token_indices = torch.where(expert_assignment_mask[expert_ix, :])
+            if token_indices.numel() == 0:
+                continue
+
+            # Process input for this expert
+            tokens_for_expert = hidden_state[token_indices, :]
+            expert_device = next(self.experts[expert_ix].parameters()).device
+            tokens_for_expert = tokens_for_expert.to(expert_device)
+
+            # Forward through expert
+            expert_output = expert(tokens_for_expert)
+            
+            if self.is_distinct_norm:
+                expert_output = self.experts_norm[expert_ix](expert_output)
+
+            expert_output_device = expert_output.to(topk_expert_activations.device)
+            
+            topk_expert_activations[token_indices, topk_slot] = expert_output_device
+            
+            weighted_output = expert_output.to(expert_device) * topk_weights[token_indices, topk_slot].unsqueeze(1).to(expert_device)
+            weighted_output = weighted_output.to(mlp_output.device)
+            
+            
+            if not self.is_max_output_experts and not self.is_cat_output_experts:
+                mlp_output.index_add_(0, token_indices, weighted_output.to(hidden_state.dtype))
+            elif self.is_max_output_experts:
+                expanded_indices = token_indices.unsqueeze(-1).expand(-1, D)
+                mlp_output = torch.scatter_reduce(
+                    mlp_output, 0, expanded_indices, weighted_output.to(hidden_state.dtype),
+                    reduce="amax", include_self=False
+                )
+            elif self.is_cat_output_experts:
+                mlp_output[token_indices, :, expert_ix] = weighted_output.to(hidden_state.dtype)
+
+        if self.is_cat_output_experts:
+            mlp_output = torch.topk(mlp_output, dim=-1, k=self.top_k)[0]
+            mlp_output = mlp_output.reshape(B*N, D)
+        
+        # weighted_sum = torch.sum(topk_expert_activations * topk_weights.unsqueeze(-1), dim=1) 
+        # diff = (mlp_output - weighted_sum).abs().max().item()
+        # print(f"diff: {diff}")
+
+        mlp_output = mlp_output.reshape(B, N, D)
+        return mlp_output, router_logits, topk_expert_ids, topk_expert_activations # shape of topk_expert_activations: (BN, top_k, D)
+    
     def forward_slow(self, hidden_state: torch.Tensor, use_lflb: bool) -> tuple[torch.Tensor, torch.Tensor]:
         """
         This is the more intuitive forward pass which loops through each expert slowly
@@ -347,6 +437,7 @@ class OlmoeMoe(nn.Module):
           
             # For each num_assigned_tokens, multiples it by the corresponding weight in topk_slot fort that token_index
             expert_output = expert_output.to(expert_device) * topk_weights[token_indices, topk_slot].unsqueeze(1).to(expert_device)
+            expert_activations[token_indices, expert_ix] = expert_output.to(hidden_state.device)
 
             # Move back to original device and acucmulate into mlp output
             expert_output = expert_output.to(mlp_output.device)
@@ -364,15 +455,10 @@ class OlmoeMoe(nn.Module):
 
         if self.is_cat_output_experts:
             # along the expert dimension, return the topk max values
-            # print(mlp_output.shape)
             mlp_output = torch.topk(mlp_output, dim = -1, k = self.top_k)[0]
-            # check how many -inf values are in the tensor
-            # print(mlp_output.shape)
-            # print(torch.sum(mlp_output == -float('inf')))
             mlp_output = mlp_output.reshape(B* N, D)
-            # print(mlp_output.shape)
-        # print(expert_outputs.shape)
         mlp_output = mlp_output.reshape(B, N, D) # Convert back from BN x D -> B x N x D
+        
         return mlp_output, router_logits, topk_expert_ids, torch.zeros((1, 1, D))
     
 

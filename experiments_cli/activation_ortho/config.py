@@ -11,8 +11,6 @@ class OrthoMappingConf:
     is_freeze_gate_weights: bool = False # whether to freeze the gate weights
     router_cos_loss_coef: float = 0 # (relative weight of cosine similarity loss for the router)
     expert_cos_loss_coef: float = 0 # (relative wegith of cosine similarty loss for the experts)
-    
-    
 
 @dataclass
 class ModelConf:
@@ -38,7 +36,7 @@ class ModelConf:
     is_freeze_rms_weight: bool = False # whether or not freeze the RMSNorm weights
     is_cat_output_experts: bool = False # whether or not concatenate the output of the experts
     is_max_output_experts: bool = False # whether or not use the max output of the experts
-    inner_mlp_dim: int = None # the dimension of the inner MLP
+    inner_mlp_dim: int = None # the dimension of the inner MLP, used for concatenating the experts' outputs, not supported yet
     
 
 

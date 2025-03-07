@@ -37,7 +37,7 @@ def get_val_stats(model, val_dl, router_aux_loss_coef, model_conf):
         val_input_ids = val_batch['input_ids'].to(model_conf.main_device)
         val_attn_mask = val_batch['attention_mask'].to(model_conf.main_device)
         
-        test_outputs = model(val_input_ids, val_attn_mask, moe_method = 'forward_slow', use_checkpointing = False)
+        test_outputs = model(val_input_ids, val_attn_mask, moe_method = 'forward_slow_with_expert_activations', use_checkpointing = False)
 
         val_base_sum += test_outputs['base_loss'].detach().cpu().item()
         val_aux_sum  += test_outputs['aux_loss'].detach().cpu().item()
@@ -131,7 +131,7 @@ def train(model, tokenizer, train_conf, model_conf, or_conf, val_dl, seed, save_
 
                 # ---------------------- Forward ----------------------
                 start_fwd = time.time()
-                outputs = model(mb_input_ids, mb_attn_mask, moe_method = 'forward_slow', use_lflb = train_conf.use_lflb, use_checkpointing = True)
+                outputs = model(mb_input_ids, mb_attn_mask, moe_method = 'forward_slow_with_expert_activations', use_lflb = train_conf.use_lflb, use_checkpointing = True)
 
                 # ---------------------- Calculate Loss ----------------------
                 loss = outputs['base_loss'] + train_conf.router_aux_loss_coef * outputs['aux_loss'] + train_conf.gap_loss_coef * outputs['gap_loss'] \

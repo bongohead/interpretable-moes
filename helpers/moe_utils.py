@@ -195,7 +195,7 @@ def representation_orthogonal_loss_func(hidden_states, conf):
     losses = [
         torch.mean(
             torch.norm(
-                zero_diagonal((check_cosine_similarity_per_token(hidden_state) - identity_matrix)), # ignore the diagonal part
+                (check_cosine_similarity_per_token(hidden_state) - identity_matrix), # ignore the diagonal part
                 p='fro', dim=(-2, -1)
             ) / top_k * math.sqrt(D)
         )

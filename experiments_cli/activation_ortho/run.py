@@ -22,19 +22,19 @@ from moe import OlmoeModel
 from train import train
 
 
-RUN_NAME = 'baseline_medium_loss_free'
-RUN_NOTES = 'baseline model with medium size'
-save_dir = 'baseline_medium_loss_free'
+RUN_NAME = 'dev_run'
+RUN_NOTES = 'dev run'
+save_dir = 'dev_run'
 
 model_conf = ModelConf(
-    D = 1024, 
-    H = 16,
-    I = 4096,
+    D = 768, 
+    H = 12,
+    I = 768 * 4,
     n_experts = 16,
     n_shared_experts = 0,
     top_k = 2,
     norm_topk_prob = False,
-    n_layers = 24,
+    n_layers = 12,
     max_position_embeddings = 1024,
     main_device = 'cuda:0',
     is_distinct_norm = False,
@@ -44,12 +44,14 @@ model_conf = ModelConf(
     inner_mlp_dim = None
 )
 
-assert model_conf.D % model_conf.top_k == 0, "D must be divisible by top_k"
-model_conf.inner_mlp_dim = int(model_conf.D / model_conf.top_k)
+# This is used for concatenating the experts' outputs, not supported yet
+if model_conf.inner_mlp_dim is None:
+    assert model_conf.D % model_conf.top_k == 0, "D must be divisible by top_k"
+    model_conf.inner_mlp_dim = int(model_conf.D / model_conf.top_k)
 
-
+# 256 is the max micro batch size for the curent model loaded on 1 H200
 train_conf = TrainConf(
-    micro_batch_size = 128,
+    micro_batch_size = 256,
     accumulation_steps = 4,
     seq_len = 1024, 
     use_lflb = True,
@@ -64,7 +66,6 @@ or_conf = OrthoMappingConf(
     is_freeze_gate_weights = False,
     router_cos_loss_coef = 0,
     expert_cos_loss_coef = 0
-
 )
 
 seed = 3456
