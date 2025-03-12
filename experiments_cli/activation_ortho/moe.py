@@ -242,6 +242,7 @@ class OlmoeMoe(nn.Module):
         """
         Forward method routes to one of several possible other forward methods
         """
+        # the other two forward methods are not used in the current implementation
         if moe_method == 'forward_slow':
             moe_output, router_logits, topk_expert_ids, expert_outputs = self.forward_slow(hidden_state, use_lflb)
         elif moe_method == 'forward_slow_with_expert_activations':
@@ -349,6 +350,7 @@ class OlmoeMoe(nn.Module):
             
             topk_expert_activations[token_indices, topk_slot] = expert_output_device
             
+
             weighted_output = expert_output.to(expert_device) * topk_weights[token_indices, topk_slot].unsqueeze(1).to(expert_device)
             weighted_output = weighted_output.to(mlp_output.device)
             
@@ -815,7 +817,7 @@ class OlmoeModel(nn.Module):
             expert_weights.append(layer.moe.experts.weight.data)
         return expert_weights
             
-    def forward(self, input_ids: torch.LongTensor, attention_mask: torch.Tensor, moe_method: str, use_lflb: bool = False, use_checkpointing : bool = False):
+    def forward(self, input_ids: torch.LongTensor, attention_mask: torch.Tensor, moe_method: str, step: int, use_lflb: bool = False, use_checkpointing : bool = False):
         """
         Params:
             @input_ids: A tensor of input IDs of size B x N, where B is the batch size and N is the sequence length.
@@ -870,9 +872,16 @@ class OlmoeModel(nn.Module):
         # Get load balancing loss
         aux_loss = load_balancing_loss_func(gate_logits = all_router_logits, num_experts = self.conf.n_experts, top_k = self.conf.top_k, attention_mask = attention_mask)
         # Get gap loss
-        gap_loss = gap_loss_func(gate_logits = all_router_logits, top_k = self.conf.top_k, attention_mask = attention_mask, upper_bound = 0.5/self.conf.top_k)
+        if step % 10 == 0:  
+            gap_loss = gap_loss_func(gate_logits = all_router_logits, top_k = self.conf.top_k, attention_mask = attention_mask, upper_bound=math.inf)
+        else:
+            gap_loss = 0
         # Get representation orthogonal loss
-        ortho_loss_mean, ortho_loss_per_layer = representation_orthogonal_loss_func(hidden_states = all_expert_outputs, conf = self.conf)
+        if step % 10 == 0:
+            ortho_loss_mean, ortho_loss_per_layer = representation_orthogonal_loss_func(hidden_states = all_expert_outputs, conf = self.conf)
+        else:
+            ortho_loss_mean = 0
+            ortho_loss_per_layer = [0] * self.conf.n_layers
         return {
             'all_router_logits': all_router_logits,
             'all_topk_experts': all_topk_experts,

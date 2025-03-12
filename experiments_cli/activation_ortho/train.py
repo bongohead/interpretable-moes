@@ -37,7 +37,7 @@ def get_val_stats(model, val_dl, router_aux_loss_coef, model_conf):
         val_input_ids = val_batch['input_ids'].to(model_conf.main_device)
         val_attn_mask = val_batch['attention_mask'].to(model_conf.main_device)
         
-        test_outputs = model(val_input_ids, val_attn_mask, moe_method = 'forward_slow_with_expert_activations', use_checkpointing = False)
+        test_outputs = model(val_input_ids, val_attn_mask, moe_method = 'forward_slow_with_expert_activations', use_checkpointing = False, step = 1) # step is 1 to avoid cos loss
 
         val_base_sum += test_outputs['base_loss'].detach().cpu().item()
         val_aux_sum  += test_outputs['aux_loss'].detach().cpu().item()
@@ -131,7 +131,7 @@ def train(model, tokenizer, train_conf, model_conf, or_conf, val_dl, seed, save_
 
                 # ---------------------- Forward ----------------------
                 start_fwd = time.time()
-                outputs = model(mb_input_ids, mb_attn_mask, moe_method = 'forward_slow_with_expert_activations', use_lflb = train_conf.use_lflb, use_checkpointing = True)
+                outputs = model(mb_input_ids, mb_attn_mask, moe_method = 'forward_slow_with_expert_activations', use_lflb = train_conf.use_lflb, use_checkpointing = True, step = step)
 
                 # ---------------------- Calculate Loss ----------------------
                 loss = outputs['base_loss'] + train_conf.router_aux_loss_coef * outputs['aux_loss'] + train_conf.gap_loss_coef * outputs['gap_loss'] \
@@ -202,8 +202,6 @@ def train(model, tokenizer, train_conf, model_conf, or_conf, val_dl, seed, save_
                     'loss': avg_loss,
                     'base_loss': outputs['base_loss'].detach().cpu().item(), # From last microbatch only
                     'aux_loss':  outputs['aux_loss'].detach().cpu().item(), # From last microbatch only
-                    'gap_loss': outputs['gap_loss'].detach().cpu().item(), # From last microbatch only
-                    'ortho_loss': outputs['ortho_loss'].detach().cpu().item(), # From last microbatch only
                     'router_cos_loss':  router_cos_loss.detach().cpu().item(),
                     'expert_cos_loss':  expert_cos_loss.detach().cpu().item()
                 },
@@ -214,6 +212,9 @@ def train(model, tokenizer, train_conf, model_conf, or_conf, val_dl, seed, save_
 
             # ============== EXPENSIVE METRICS (EVERY 10 STEPS) ==============
             if step % 10 == 0:
+                
+                metrics['train']['gap_loss'] = outputs['gap_loss'].detach().cpu().item()
+                metrics['train']['ortho_loss'] = outputs['ortho_loss'].detach().cpu().item()
                 
                 router_cos_dict_final = {}
                 for layer_idx, router_cos_loss_layer in enumerate(router_cos_loss_per_layer):

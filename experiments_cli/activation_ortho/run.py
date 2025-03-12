@@ -22,9 +22,9 @@ from moe import OlmoeModel
 from train import train
 
 
-RUN_NAME = 'dev_run'
-RUN_NOTES = 'dev run'
-save_dir = 'dev_run'
+RUN_NAME = 'RMS_fixed_small_learning_rate_2'
+RUN_NOTES = 'RMS_fixed_small_learning_rate_2'
+save_dir = 'RMS_fixed_small_learning_rate_2'
 
 model_conf = ModelConf(
     D = 768, 
@@ -51,14 +51,16 @@ if model_conf.inner_mlp_dim is None:
 
 # 256 is the max micro batch size for the curent model loaded on 1 H200
 train_conf = TrainConf(
-    micro_batch_size = 256,
-    accumulation_steps = 4,
+    micro_batch_size = 128,
+    accumulation_steps = 8,
     seq_len = 1024, 
     use_lflb = True,
     gap_loss_coef = 0,
     router_aux_loss_coef = 0.01,
     ortho_loss_coef = 0,
-    warmup_steps = 500
+    warmup_steps = 500,
+    lr = 0.0005 * 2 ,
+    min_lr = 0.00005 * 2
 )
 
 or_conf = OrthoMappingConf(
