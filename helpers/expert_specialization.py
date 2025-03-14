@@ -1,5 +1,7 @@
 """
-This file contains calculations for expert-specialization metrics.
+This file contains calculations for expert-specialization metrics. Note that most metrics require using a `ContextLabeledDataset` object, which
+is an object of synthetic contextually-labeled token samples from https://github.com/bongohead/interpretable-moes-analysis/tree/master/datasets/contextual-tokens.
+You can get this object by calling `get_context_labeled_data` (which will download any files as needed).
 """
 
 import glob
@@ -8,6 +10,9 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 import math
 import numpy as np
+import os
+import warnings
+import requests
 
 class ContextLabeledDataset(Dataset):
     """
@@ -72,19 +77,76 @@ class ContextLabeledDataset(Dataset):
     def __getitem__(self, idx):
         return self.records[idx]
     
+def download_contextual_yaml_files(contextual_tokens_dir: str, overwrite: bool = True):
+    """"
+    Download all files in https://github.com/bongohead/interpretable-moes-analysis/tree/master/datasets/contextual-tokens
 
-def get_context_labeled_data(search_path: str, tokenizer, max_length: int = 512, batch_size: int = 16) -> list[dict]:
+    Description:
+        It will throw a warning if there are samples file in the local that don't exist in the remote.
+
+    Params:
+        @contextual_tokens_dir: The directory to download the contextual files into.
+        @overwrite: If True, overwrites existing files with the same name.
+    """
+    
+    os.makedirs(contextual_tokens_dir, exist_ok = True)
+        
+    # List files
+    response = requests.get('https://api.github.com/repos/bongohead/interpretable-moes-analysis/contents/datasets/contextual-tokens')
+    if response.status_code != 200:
+        warnings.warn(f"Failed to get repository contents: {response.status_code}")
+        return
+    
+    remote_filenames = set()
+    for item in response.json():
+        if (item["type"] == "file" and item["name"].startswith("samples_") and item["name"].endswith(".yaml")):
+            remote_filenames.add(item["name"])
+
+    local_filenames = set()
+    for filename in os.listdir(contextual_tokens_dir):
+        if filename.startswith("samples_") and filename.endswith(".yaml"):
+            local_filenames.add(filename)
+
+    # Check for extra local files that don't exist in remote
+    extra_files = local_filenames - remote_filenames
+    if extra_files:
+        warnings.warn(f"Found {len(extra_files)} extra YAML files locally that don't exist in the remote: {', '.join(extra_files)}")
+
+    for item in response.json():
+        if (not item["type"] == "file" or not item["name"].startswith("samples_") or not item["name"].endswith(".yaml")):
+            continue
+
+        file_name = item["name"]
+        file_path = os.path.join(contextual_tokens_dir, file_name)
+                        
+        if overwrite == True or os.path.exists(file_path) == False:
+            file_response = requests.get(item["download_url"])
+            
+            if file_response.status_code == 200:
+                with open(file_path, "wb") as f:
+                    f.write(file_response.content)
+                # print(f"Downloaded {file_name}")
+            else:
+                warnings.warn(f"Failed {file_name}: {file_response.status_code}")
+    
+    return None
+
+def get_context_labeled_data(contextual_tokens_dir: str, tokenizer, max_length: int = 512, batch_size: int = 16, check_for_updates: bool = False) -> list[dict]:
     """
     Get a dataloader that returns the text examples with assigned token-meaning labels.
      For use in testing for interpretable expert specialization, via `get_ics` and `get_tis`.
     
     Params:
-        @search_path: The file serach path containing YAML files of samples
+        @contextual_tokens_dir: The directory to download the YAML contextual-samples files
         @tokenizer: A HF-style tokenizer
         @max_length: The truncation length for examples
         @batch_size: The batch size to return for each dataloader iteration
-    
+        @check_for_updates: Whether to check for new updates to the dataset
+
     Example:
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained('allenai/OLMoE-1B-7B-0924', add_eos_token = False, add_bos_token = False)
+
         context_aware_test_dataset = get_context_labeled_data("./../../data/contextual-tokens/samples_*.yaml", tokenizer, 512, 64)
 
     Returns:
@@ -119,6 +181,10 @@ def get_context_labeled_data(search_path: str, tokenizer, max_length: int = 512,
             "raw_text_samples": [item['text_samples'] for item in batch]
         }
     
+    search_path = os.path.join(contextual_tokens_dir, 'samples_*.yaml')
+    if check_for_updates or len(glob.glob(search_path)) == 0:
+        download_contextual_yaml_files(contextual_tokens_dir, overwrite = True)
+
     yaml_files = glob.glob(search_path)
     if len(yaml_files) == 0:
         raise Exception('No files in search path!')
@@ -136,6 +202,7 @@ def get_context_labeled_data(search_path: str, tokenizer, max_length: int = 512,
             'dl': DataLoader(ds, batch_size = batch_size, shuffle = True, collate_fn = collate_fn)
         })
     return dls
+
 
 def get_js_distance(counts_p, counts_q):
     """
@@ -391,7 +458,6 @@ def get_tis(model, test_token_data_list, main_device, pad_token_id, use_topk1 = 
         results[token_str] = {i: val for i, val in enumerate(layer_js_list)}
         
     return results
-
 
 
 @torch.no_grad()
