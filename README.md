@@ -34,12 +34,12 @@ Setup instructions are below.
 First, create a new branch and switch to it.
 
 Then, download and prepare your training and validation data: 
-1. Run `data/download-sft-data.ipynb` to pull [Fineweb-edu](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu) data for training and validation. This downloads data as JSON shards into `data/raw-data`. Note that in general, 1 sample => ~1k tokens, so that 200k samples/shard leads to 200M tokens/shard, you'll need ~500 shards to train on 100B tokens.
-2. Run `data/process-sft-data.ipynb` to preprocess training and validation shards into token IDs. This may be slow, but it can be run asynchronously during downloading (or during model training).
+1. Run `data/sft-data/download-sft-data.ipynb` to pull [Fineweb-edu](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu) data for training and validation. This downloads data as JSON shards into `data/raw-data`. Note that in general, 1 sample => ~1k tokens, so that 200k samples/shard leads to 200M tokens/shard, you'll need ~500 shards to train on 100B tokens.
+2. Run `data/sft-data/process-sft-data.ipynb` to preprocess training and validation shards into token IDs. This may be slow, but it can be run asynchronously during downloading (or during model training).
 
 Next, to develop and train a model:
 1. Create a new folder in `experiments`.
-2. Copy `experiment.ipynb` from `experiments/base-olmoe` into your new folder. 
+2. Copy `experiment.ipynb` from `experiments/base` into your new folder. 
 
 This notebook contains end-to-end code for a baseline MoE LLM implementation, including model classes and model training code. A few notes on the baseline architecture implemented there:
 
